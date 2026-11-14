@@ -283,7 +283,10 @@ class SuggestResult:
     oi: Optional[OiProfile] = None
 
 
-def pick_expiry(provider, symbol: str, asof: dt.date, cfg: StrategyConfig) -> Optional[dt.date]:
+def pick_expiry(provider, symbol: str, asof: dt.date, cfg: StrategyConfig,
+                selected_expiry: Optional[dt.date] = None) -> Optional[dt.date]:
+    if selected_expiry is not None:
+        return selected_expiry if selected_expiry > asof else None
     for e in provider.expiries(symbol, asof, 4):
         if cfg.min_dte <= (e - asof).days <= cfg.max_dte:
             return e
@@ -292,12 +295,12 @@ def pick_expiry(provider, symbol: str, asof: dt.date, cfg: StrategyConfig) -> Op
 
 def suggest(symbol: str, bars: list[dict[str, Any]], provider, asof: dt.date, cfg: StrategyConfig = StrategyConfig(),
             mkt: MarketConfig = MarketConfig(), cm: CostModel = CostModel(), top_n: int = 3,
-            override_trend: Optional[str] = None) -> SuggestResult:
+            override_trend: Optional[str] = None, selected_expiry: Optional[dt.date] = None) -> SuggestResult:
     """Ranked F&O suggestions for `symbol` as of `asof`, using only bars on or before that date.
     override_trend ('bullish'|'bearish'|'neutral') replaces the technical trend: used for random-signal baselines."""
     bars = [b for b in bars if b["date"] <= asof] if bars and bars[-1]["date"] > asof else bars
     res = SuggestResult(symbol, asof, None, None)
-    expiry = pick_expiry(provider, symbol, asof, cfg)
+    expiry = pick_expiry(provider, symbol, asof, cfg, selected_expiry)
     if expiry is None:
         res.code, res.note = "no_expiry", f"no expiry between {cfg.min_dte} and {cfg.max_dte} days away"
         return res

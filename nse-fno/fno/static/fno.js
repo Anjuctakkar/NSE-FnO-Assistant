@@ -305,6 +305,9 @@
       <input type="text" id="fnoSym" list="fnoSyms" placeholder="e.g. TCS" autocomplete="off" spellcheck="false" /><datalist id="fnoSyms"></datalist></div>
     <label for="fnoAsof">As of</label>
     <select id="fnoAsof"><option value="">Latest day</option></select>
+    <div id="fnoExpiryWrap"><label for="fnoExpiry">Option expiry (market scan)</label>
+      <select id="fnoExpiry" disabled><option value="">Loading expiries…</option></select>
+      <div class="hint">Only expiries with option data on the selected day are listed.</div></div>
   </div>
   <div class="fno-sec"><h2>Rules</h2>
     <label class="first" for="fnoRisk">Risk per trade (₹, sets the lots)</label>
@@ -363,6 +366,33 @@
     const inp = $("#fnoSym");
     if (!inp.value || (S.symbols.length && !S.symbols.includes(inp.value.toUpperCase()) && S.source === "synthetic")) inp.value = S.symbols.includes("TCS") ? "TCS" : (S.symbols[0] || "");
     $("#fnoVol").value = S.source === "bhavcopy" ? ($("#fnoVol").value || 10) : 0;
+    await loadExpiryOptions();
+  }
+
+  async function loadExpiryOptions() {
+    const wrap = $("#fnoExpiryWrap"), sel = $("#fnoExpiry");
+    const enabled = S.source === "bhavcopy" && S.mode === "market";
+    wrap.style.display = enabled ? "" : "none";
+    if (!enabled) { sel.disabled = true; return; }
+    const keep = sel.value;
+    sel.disabled = true;
+    sel.innerHTML = `<option value="">Loading expiries…</option>`;
+    try {
+      const query = new URLSearchParams({ source: S.source });
+      if (val("#fnoAsof")) query.set("asof", val("#fnoAsof"));
+      const result = await api("/expiries?" + query.toString());
+      const expiries = Array.isArray(result.expiries) ? result.expiries : [];
+      sel.innerHTML = expiries.length
+        ? expiries.map(d => `<option value="${esc(d)}">${esc(fdate(d))}</option>`).join("")
+        : `<option value="">No expiries available</option>`;
+      sel.value = expiries.includes(keep) ? keep : (expiries[0] || "");
+      sel.disabled = expiries.length === 0;
+      if (!expiries.length) say("#fnoMsg", "No upcoming option expiries are available for this day.", "err");
+    } catch (e) {
+      sel.innerHTML = `<option value="">Could not load expiries</option>`;
+      sel.disabled = true;
+      say("#fnoMsg", esc(e.message), "err");
+    }
   }
 
   /** Downloads the chosen history, one window at a time so each request is short. Returns true when it finished without an error. */
@@ -615,9 +645,11 @@ ${opt.scan ? `<div style="padding:10px 18px 12px"><button class="small" data-act
     $("#fnoModeMkt").classList.toggle("on", m === "market"); $("#fnoModeOne").classList.toggle("on", m === "one");
     $("#fnoModeMkt").setAttribute("aria-pressed", m === "market"); $("#fnoModeOne").setAttribute("aria-pressed", m === "one");
     $("#fnoSymWrap").style.display = m === "one" ? "" : "none";
+    $("#fnoExpiryWrap").style.display = m === "market" && S.source === "bhavcopy" ? "" : "none";
     $("#fnoRunSug").textContent = m === "market" ? "Find trades" : "Suggest trades";
     $("#fnoRunBt").style.display = m === "one" ? "" : "none";
     $("#fnoModeHint").textContent = m === "market" ? "Scans every F&O stock and ranks the best trades by Greeks and open interest. No stock needed." : "Looks at one stock in detail: its trend, IV, open interest and the best trades.";
+    if (m === "market" && S.source === "bhavcopy" && S.status) loadExpiryOptions();
     renderMain();
   }
   const renderMain = () => S.view === "scan" ? renderScan() : renderSug();
@@ -625,9 +657,13 @@ ${opt.scan ? `<div style="padding:10px 18px 12px"><button class="small" data-act
   function openStock(sym, backtest) { setMode("one"); $("#fnoSym").value = sym; if (backtest) runBacktest(); else { setTab("sug"); runSuggest(); } }
 
   async function runScan() {
+    const expiry = S.source === "bhavcopy" ? val("#fnoExpiry") : "";
+    if (S.source === "bhavcopy" && !expiry) { say("#fnoMsg", "Select an available option expiry first.", "err"); return; }
     const b = $("#fnoRunSug"); b.disabled = true; setTab("sug"); S.view = "scan";
-    say("#fnoMsg", busy("Scanning the market: shortlisting every stock, then evaluating the best in full (10 to 30 seconds)…"));
-    try { S.scan = await post("/scan", Object.assign(params(), { top_n: 10 })); say("#fnoMsg", ""); renderScan(); }
+    say("#fnoMsg", busy("Scanning stocks for the selected expiry (10 to 30 seconds)…"));
+    const req = Object.assign(params(), { top_n: 10 });
+    if (expiry) req.expiry = expiry;
+    try { S.scan = await post("/scan", req); say("#fnoMsg", ""); renderScan(); }
     catch (e) { say("#fnoMsg", esc(e.message), "err"); } finally { b.disabled = false; }
   }
 
@@ -654,7 +690,7 @@ ${opt.scan ? `<div style="padding:10px 18px 12px"><button class="small" data-act
   function renderScan() {
     const r = S.scan, el = $("#fnoPanSug");
     if (!r) { el.innerHTML = STEPS; return; }
-    let h = `<h2 style="font-size:15px;margin:0 0 4px">Market scan <span class="mute" style="font-weight:400">as of ${r.asof ? esc(fdate(r.asof)) : "—"}${r.eligible != null ? ` · ${r.eligible} stocks looked at, ${r.shortlisted} evaluated in full` : ""}</span></h2>`;
+    let h = `<h2 style="font-size:15px;margin:0 0 4px">Market scan <span class="mute" style="font-weight:400">as of ${r.asof ? esc(fdate(r.asof)) : "—"}${r.expiry ? ` · expiry ${esc(fdate(r.expiry))}` : ""}${r.eligible != null ? ` · ${r.eligible} stocks looked at, ${r.shortlisted} evaluated in full` : ""}</span></h2>`;
     const notes = r.data_notes || [];
     const notesHtml = r.source === "synthetic" ? notes.map(n => `<div class="note bad">${esc(n)}</div>`).join("")
       : notes.length ? `<details><summary>About this data (${notes.length} note${notes.length > 1 ? "s" : ""})</summary>${notes.map(n => `<div class="note info">${esc(n)}</div>`).join("")}</details>` : "";
@@ -806,6 +842,7 @@ ${cmpRow("Net P&amp;L", "total_net_pnl", sinr, m, rm)}${cmpRow("Profit factor", 
     $("#fnoModeOne").addEventListener("click", () => setMode("one"));
     $("#fnoRunBt").addEventListener("click", runBacktest);
     $("#fnoSym").addEventListener("keydown", e => { if (e.key === "Enter") runSuggest(); });
+    $("#fnoAsof").addEventListener("change", loadExpiryOptions);
     S.host.querySelectorAll(".fno-tabs button").forEach(b => b.addEventListener("click", () => setTab(b.dataset.t)));
     loadLog(); setMode("market"); renderBacktest(); renderLog(); loadStatus();
     root.FnoUI = { state: S, runSuggest, runBacktest };

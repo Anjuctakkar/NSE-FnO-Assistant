@@ -266,6 +266,16 @@ def list_symbols(ctx: Context, source: str) -> dict[str, Any]:
     return {"source": source, "symbols": DEMO_SYMBOLS if source == "synthetic" else ctx.store.symbols()}
 
 
+def list_expiries(ctx: Context, req: dict[str, Any]) -> dict[str, Any]:
+    source = _source(req)
+    if source == "synthetic" or not ctx.store.dates():
+        return {"source": source, "asof": None, "expiries": []}
+    asof = _store_asof(ctx, req)
+    expiries = sorted({r["expiry"] for r in ctx.store.read_day(asof)
+                       if r["inst"] == "OPT" and r["expiry"] > asof})
+    return jsonable({"source": source, "asof": asof, "expiries": expiries})
+
+
 def history_issue(ctx: Context, symbol: str, source: str, have: int, need: int, title: Optional[str] = None, file_hint: bool = True) -> dict[str, Any]:
     stored = len(ctx.store.dates()) if source == "bhavcopy" else None
     where = f"Only {have} trading days of prices were available for {symbol}" + (f" ({stored} days of bhavcopy are stored)." if stored is not None else ".")
@@ -471,21 +481,27 @@ def run_scan(ctx: Context, req: dict[str, Any], bars: Optional[list[dict[str, An
     if not dates:
         raise ServiceError("No bhavcopy is stored yet. Use Sync (downloads from NSE) or Import (a file you downloaded in a browser).")
     asof = _store_asof(ctx, req)
+    selected_expiry = _parse_day(req.get("expiry"), "expiry")
+    if selected_expiry is not None and selected_expiry not in {
+        r["expiry"] for r in ctx.store.read_day(asof) if r["inst"] == "OPT" and r["expiry"] > asof
+    }:
+        raise ServiceError(f"No option contracts are available for expiry {selected_expiry} on {asof}.")
     n_days = len([d for d in dates if d <= asof])
     if n_days < MIN_HISTORY_DAYS:
-        return jsonable({"mode": "scan", "source": source, "asof": asof, "ideas": [], "data_notes": [],
+        return jsonable({"mode": "scan", "source": source, "asof": asof, "expiry": selected_expiry, "ideas": [], "data_notes": [],
                          "issue": history_issue(ctx, "the market scan", source, n_days, MIN_HISTORY_DAYS, title="Not enough price history to scan the market", file_hint=False)})
     idx = SummaryIndex(ctx.store, ctx.mkt)
     missing = idx.missing_days()
     if len(missing) > SCAN_INLINE_INDEX_DAYS:
-        return jsonable({"mode": "scan", "source": source, "asof": asof, "ideas": [], "data_notes": [],
+        return jsonable({"mode": "scan", "source": source, "asof": asof, "expiry": selected_expiry, "ideas": [], "data_notes": [],
                          "issue": {"code": "index_needed", "title": "One-time index needed", "missing": len(missing), "total": len(dates), "fix": "index",
                                    "detail": f"The scan looks at every stock at once, so it first builds a compact index of the {len(missing)} stored days that lack one "
                                              f"(about {max(1, len(missing) // 6)} seconds). It is done once; new days are added as they are synced."}})
     if missing:
         idx.build(max_days=SCAN_INLINE_INDEX_DAYS)
     data = idx.load(upto=asof, lookback_days=ScanConfig().lookback)
-    res = market_scan(ctx.store, data, asof, cfg, ctx.mkt, ctx.cm, ScanConfig(top_n=top_n))
+    res = market_scan(ctx.store, data, asof, cfg, ctx.mkt, ctx.cm, ScanConfig(top_n=top_n),
+                      selected_expiry=selected_expiry)
     notes = ["Technicals in the scan use the closes recorded in the bhavcopy (no intraday high/low), so ATR and swing levels are close-to-close.",
              "Bhavcopy has settlement prices but no bid/ask or implied volatility: IV is solved from the settlement price, and slippage uses an assumed spread. "
              "Contracts that did not trade carry a theoretical price (use the minimum-volume filter)."]
@@ -493,10 +509,11 @@ def run_scan(ctx: Context, req: dict[str, Any], bars: Optional[list[dict[str, An
         notes.append(f"Only {n_days} days are stored: IV rank needs about a year to be meaningful.")
     note = ""
     if not res.rows:
-        note = "No stock passed the first screen (history, traded options and implied volatility): see what was skipped."
+        note = (f"No stock passed the first screen for expiry {selected_expiry} (history, traded options and implied volatility): see what was skipped."
+                if selected_expiry else "No stock passed the first screen (history, traded options and implied volatility): see what was skipped.")
     elif not res.ideas:
         note = f"{res.nothing_passed} shortlisted stocks were evaluated in full and none produced a trade that passed the filters."
-    return jsonable({"mode": "scan", "source": source, "asof": asof, "issue": None, "note": note, "data_notes": notes,
+    return jsonable({"mode": "scan", "source": source, "asof": asof, "expiry": selected_expiry, "issue": None, "note": note, "data_notes": notes,
                      "universe": res.universe, "eligible": len(res.rows), "shortlisted": len(res.candidates), "nothing_passed": res.nothing_passed,
                      "skipped": res.skipped, "market": res.market, "top_shortlist": [{"symbol": r.symbol, "score": round(r.score, 1), "bias": r.regime.trend} for r in res.rows[:10]],
                      "ideas": [_scan_payload(ctx, s, r, alts, i + 1, source) for i, (s, r, alts) in enumerate(res.ideas)],

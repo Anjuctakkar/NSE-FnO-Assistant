@@ -41,9 +41,6 @@ class CostModel:
 
 @dataclass(frozen=True)
 class StrategyConfig:
-    # Expiry selection (calendar days to expiry)
-    min_dte: int = 12                 # skip expiries closer than this when picking the trade expiry
-    max_dte: int = 45
     min_dte_credit: int = 10          # short-gamma structures are not opened inside this window
     exit_dte: int = 5                 # close positions with this many days (or fewer) left: avoids pin risk
                                       # and physical settlement of stock options

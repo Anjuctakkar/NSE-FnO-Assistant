@@ -281,29 +281,64 @@ class SuggestResult:
     have_bars: int = 0
     need_bars: int = 0
     oi: Optional[OiProfile] = None
+    expiries: list[dt.date] = field(default_factory=list)
 
 
-def pick_expiry(provider, symbol: str, asof: dt.date, cfg: StrategyConfig) -> Optional[dt.date]:
-    for e in provider.expiries(symbol, asof, 4):
-        if cfg.min_dte <= (e - asof).days <= cfg.max_dte:
-            return e
-    return None
+def pick_expiries(provider, symbol: str, asof: dt.date, count: int = 2) -> list[dt.date]:
+    if count < 1:
+        return []
+    return [e for e in provider.expiries(symbol, asof, count + 1) if e > asof][:count]
+
+
+def pick_expiry(provider, symbol: str, asof: dt.date) -> Optional[dt.date]:
+    expiries = pick_expiries(provider, symbol, asof, 1)
+    return expiries[0] if expiries else None
 
 
 def suggest(symbol: str, bars: list[dict[str, Any]], provider, asof: dt.date, cfg: StrategyConfig = StrategyConfig(),
             mkt: MarketConfig = MarketConfig(), cm: CostModel = CostModel(), top_n: int = 3,
-            override_trend: Optional[str] = None) -> SuggestResult:
+            override_trend: Optional[str] = None, expiry_count: int = 1) -> SuggestResult:
     """Ranked F&O suggestions for `symbol` as of `asof`, using only bars on or before that date.
     override_trend ('bullish'|'bearish'|'neutral') replaces the technical trend: used for random-signal baselines."""
     bars = [b for b in bars if b["date"] <= asof] if bars and bars[-1]["date"] > asof else bars
-    res = SuggestResult(symbol, asof, None, None)
-    expiry = pick_expiry(provider, symbol, asof, cfg)
-    if expiry is None:
-        res.code, res.note = "no_expiry", f"no expiry between {cfg.min_dte} and {cfg.max_dte} days away"
-        return res
+    expiries = pick_expiries(provider, symbol, asof, expiry_count)
+    if not expiries:
+        return SuggestResult(symbol, asof, None, None, note="no upcoming expiry available", code="no_expiry")
+
+    runs = [_suggest_for_expiry(symbol, bars, provider, asof, expiry, cfg, mkt, cm, top_n, override_trend)
+            for expiry in expiries]
+    res = SuggestResult(symbol, asof, None, expiries[0], expiries=expiries)
+    res.regime = next((run.regime for run in runs if run.regime is not None), None)
+    res.oi = next((run.oi for run in runs if run.oi is not None), None)
+    res.rejected = [(f"{name} ({run.expiry})", why) for run in runs for name, why in run.rejected]
+    res.suggestions = [suggestion for run in runs for suggestion in run.suggestions]
+    if res.suggestions:
+        res.code = "ok"
+    elif all(run.code == "no_chain" for run in runs):
+        res.code, res.note = "no_chain", "no option chain available for the selected expiries"
+    elif all(run.code == "insufficient_history" for run in runs):
+        res.code, res.have_bars, res.need_bars = "insufficient_history", runs[0].have_bars, runs[0].need_bars
+        res.note = runs[0].note
+    elif any(run.code == "filtered" for run in runs):
+        res.code, res.note = "filtered", "candidates were considered, but none passed the filters for the selected expiries"
+    elif any(run.code == "no_edge" for run in runs):
+        res.code = "no_edge"
+        res.note = next(run.note for run in runs if run.code == "no_edge")
+    elif any(run.code == "insufficient_history" for run in runs):
+        run = next(run for run in runs if run.code == "insufficient_history")
+        res.code, res.have_bars, res.need_bars, res.note = "insufficient_history", run.have_bars, run.need_bars, run.note
+    else:
+        res.code, res.note = "no_chain", "no option chain available for the selected expiries"
+    return res
+
+
+def _suggest_for_expiry(symbol: str, bars: list[dict[str, Any]], provider, asof: dt.date, expiry: dt.date,
+                        cfg: StrategyConfig, mkt: MarketConfig, cm: CostModel, top_n: int,
+                        override_trend: Optional[str]) -> SuggestResult:
+    res = SuggestResult(symbol, asof, None, expiry)
     chain = provider.get_chain(symbol, asof, expiry)
     if chain is None or not chain.quotes:
-        res.code, res.note = "no_chain", "no option chain available"
+        res.code, res.note = "no_chain", f"no option chain available for {expiry}"
         return res
     regime = compute_regime(bars, provider.atm_iv_history(symbol, asof, 252), chain.atm_iv())
     if regime is None:

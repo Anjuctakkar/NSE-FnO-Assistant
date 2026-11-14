@@ -89,6 +89,10 @@ def make_handler(ctx: service.Context, heavy: threading.Semaphore):
                 self._run(service.status, ctx)
             elif u.path == "/api/fno/symbols":
                 self._run(service.list_symbols, ctx, parse_qs(u.query).get("source", ["bhavcopy"])[0])
+            elif u.path == "/api/fno/expiries":
+                query = parse_qs(u.query)
+                self._run(service.list_expiries, ctx, {"source": query.get("source", ["bhavcopy"])[0],
+                                                        "asof": query.get("asof", [""])[0]})
             else:
                 self._json(404, {"detail": "Not found."})
 

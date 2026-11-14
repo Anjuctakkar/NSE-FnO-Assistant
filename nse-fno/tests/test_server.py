@@ -70,6 +70,8 @@ def test_import_endpoint_accepts_raw_bytes_and_rejects_junk():
         r = json.loads(body)
         assert code == 200 and r["imported"]["date"] == "2026-10-01" and r["bhavcopy"]["days"] == 1
         assert json.loads(call(base + "/api/fno/status")[2])["bhavcopy"]["symbols"] == 1
+        code, _, body = call(base + "/api/fno/expiries?asof=2026-10-01")
+        assert code == 200 and json.loads(body)["expiries"] == ["2026-10-27"]
         code, _, body = call(base + "/api/fno/bhavcopy/import?name=junk.csv", raw=b"a,b\n1,2\n", headers={"Content-Type": "application/octet-stream"})
         assert code == 400 and "junk.csv" in json.loads(body)["detail"]
     finally:

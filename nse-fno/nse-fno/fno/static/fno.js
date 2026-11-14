@@ -569,13 +569,27 @@ ${opt.scan ? `<div style="padding:10px 18px 12px"><button class="small" data-act
   function renderSug() {
     const r = S.sug, el = $("#fnoPanSug");
     if (!r) { el.innerHTML = `<div class="empty">Type an NSE symbol and press <b>Suggest trades</b> to look at one stock in detail.</div>`; return; }
-    let h = `<h2 style="font-size:15px;margin:0 0 4px">${esc(r.symbol)} <span class="mute" style="font-weight:400">as of ${esc(fdate(r.asof))}${r.expiry ? " · trade expiry " + esc(fdate(r.expiry)) : ""}</span></h2>`;
+    const plannedExpiries = Array.isArray(r.expiries) ? r.expiries : (r.expiry ? [r.expiry] : []);
+    let h = `<h2 style="font-size:15px;margin:0 0 4px">${esc(r.symbol)} <span class="mute" style="font-weight:400">as of ${esc(fdate(r.asof))}${plannedExpiries.length ? " · expiries " + plannedExpiries.map(fdate).join(", ") : ""}</span></h2>`;
     if (r.issue) { el.innerHTML = h + issuePanel(r.issue) + (r.data_notes || []).map(n => `<div class="note info">${esc(n)}</div>`).join(""); wireFix(el, runSuggest); return; }
     const notes = r.data_notes || [];
     h += (r.source === "synthetic" ? notes.map(n => `<div class="note bad">${esc(n)}</div>`).join("")
       : notes.length ? `<details><summary>About this data (${notes.length} note${notes.length > 1 ? "s" : ""})</summary>${notes.map(n => `<div class="note info">${esc(n)}</div>`).join("")}</details>` : "") + regimeStrip(r.regime, r.oi);
     if (!r.suggestions.length) h += `<div class="panel"><h3>No trade</h3><div style="font-size:15px;margin-bottom:6px">${esc(r.note || "Nothing passed the filters.")}</div><div class="hint">Staying out is a valid output. The rules only suggest a trade when the trend, the IV level, the Greeks and the costs agree.</div></div>`;
-    h += r.suggestions.map((x, i) => suggestionCard(x, i, {})).join("");
+    const groups = new Map();
+    r.suggestions.forEach((s, i) => {
+      const expiry = s.structure.legs[0].expiry;
+      if (!groups.has(expiry)) groups.set(expiry, []);
+      groups.get(expiry).push({ suggestion: s, index: i });
+    });
+    const expiries = [...new Set([...plannedExpiries, ...groups.keys()])].sort();
+    expiries.forEach(expiry => {
+      const items = groups.get(expiry) || [];
+      h += `<div class="sec-title">Expiry ${esc(fdate(expiry))}</div>`;
+      h += items.length
+        ? items.map(({ suggestion, index }) => suggestionCard(suggestion, index, {})).join("")
+        : `<div class="note info">No candidates passed the filters for this expiry.</div>`;
+    });
     if (r.rejected.length) h += `<details><summary>${r.rejected.length} candidate${r.rejected.length > 1 ? "s" : ""} considered and rejected</summary><ul class="why">${r.rejected.map(x => `<li><b>${esc(x.structure)}</b>: ${esc(x.reason)}</li>`).join("")}</ul></details>`;
     el.innerHTML = h; hookCharts(el);
     el.querySelectorAll(".sug").forEach(card => {

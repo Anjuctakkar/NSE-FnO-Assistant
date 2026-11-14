@@ -6,7 +6,7 @@ from fno.config import CostModel, MarketConfig, StrategyConfig
 from fno.data import SyntheticProvider
 from fno.demo_data import make_synthetic_bars
 from fno.models import Leg, Structure
-from fno.selector import candidate_names, evaluate, make_exit_plan, structure_pop, suggest
+from fno.selector import candidate_names, evaluate, make_exit_plan, pick_expiries, pick_expiry, structure_pop, suggest
 from fno.signals import Regime, compute_regime, iv_percentile, iv_rank
 from fno.strategies import bear_call_spread, bull_call_spread, bull_put_spread, iron_condor, pick_by_delta
 
@@ -160,8 +160,36 @@ def test_suggest_degrades_gracefully():
     bars, prov = env(400)
     res = suggest("TEST", bars[:30], prov, bars[29]["date"], StrategyConfig(), MKT, CM)
     assert not res.suggestions and res.note
-    res = suggest("TEST", bars, prov, bars[-1]["date"], StrategyConfig(min_dte=300, max_dte=400), MKT, CM)
-    assert not res.suggestions and "expiry" in res.note
+
+
+def test_pick_expiry_uses_nearest_future_expiry_without_a_day_window():
+    asof = dt.date(2026, 1, 1)
+
+    class Provider:
+        def expiries(self, symbol, date, n):
+            return [date, date + dt.timedelta(days=5), date + dt.timedelta(days=90)]
+
+    assert pick_expiry(Provider(), "TEST", asof) == asof + dt.timedelta(days=5)
+
+    class NoUpcomingExpiryProvider:
+        def expiries(self, symbol, date, n):
+            return [date]
+
+    assert pick_expiry(NoUpcomingExpiryProvider(), "TEST", asof) is None
+
+
+def test_suggest_can_return_ideas_for_the_nearest_two_expiries():
+    bars, prov = env(500, seed=11)
+    found = None
+    for i in range(120, len(bars), 7):
+        res = suggest("TEST", bars[:i + 1], prov, bars[i]["date"], RELAXED, MKT, CM,
+                      override_trend="bullish", expiry_count=2)
+        if len({s.structure.expiry for s in res.suggestions}) == 2:
+            found = res
+            break
+    assert found is not None, "expected suggestions for both selected expiries"
+    assert len(found.expiries) == 2
+    assert {s.structure.expiry for s in found.suggestions} == set(found.expiries)
 
 
 def test_stretched_move_is_penalised_and_warned_about():
@@ -208,5 +236,4 @@ def test_every_outcome_has_a_reason_and_only_real_suggestions_are_ok():
             assert res.have_bars == i + 1 and res.need_bars == 60
     short = suggest("TEST", bars[:30], prov, bars[29]["date"], StrategyConfig(), MKT, CM)
     assert short.code in ("insufficient_history", "no_chain") and not short.suggestions
-    assert suggest("TEST", bars, prov, bars[-1]["date"], StrategyConfig(min_dte=300, max_dte=400), MKT, CM).code == "no_expiry"
     assert "ok" in seen or "filtered" in seen or "no_edge" in seen

@@ -286,8 +286,8 @@ def data_issue(ctx: Context, res, symbol: str, source: str, asof: dt.date) -> Op
         return {"code": res.code, "title": f"No option chain for {symbol} on {asof}", "fix": None,
                 "detail": f"There are no option contracts for {symbol} on {asof}: it may not trade in F&O, or that day is missing from the stored data."}
     if res.code == "no_expiry":
-        return {"code": res.code, "title": "No suitable expiry", "fix": None,
-                "detail": f"No monthly expiry falls inside the 12 to 45 day window on {asof}. Try another date."}
+        return {"code": res.code, "title": "No upcoming expiry", "fix": None,
+                "detail": f"No upcoming option expiry is available for {symbol} on {asof}."}
     return None
 
 
@@ -297,13 +297,15 @@ def run_suggest(ctx: Context, req: dict[str, Any], bars: Optional[list[dict[str,
     prov, bars, notes = get_provider(ctx, source, symbol, bars, iv_scale)
     asof = _asof(prov, symbol, req, bars)
     cfg = strategy_config(req)
-    res = suggest(symbol, bars, prov, asof, cfg, ctx.mkt, ctx.cm, top_n=int(_f(req, "top_n", 3, 1, 6)))
+    res = suggest(symbol, bars, prov, asof, cfg, ctx.mkt, ctx.cm, top_n=int(_f(req, "top_n", 3, 1, 6)),
+                  expiry_count=2)
     spot = prov.spot(symbol, asof) or 0.0
     issue = data_issue(ctx, res, symbol, source, asof)
     if issue and issue["code"] == "insufficient_history":
         notes = [n for n in notes if not n.startswith("Only ")]          # the issue panel already says it
     return jsonable({
-        "symbol": symbol, "source": source, "asof": asof, "expiry": res.expiry, "note": res.note, "code": res.code,
+        "symbol": symbol, "source": source, "asof": asof, "expiry": res.expiry, "expiries": res.expiries,
+        "note": res.note, "code": res.code,
         "issue": issue, "data_notes": notes, "oi": res.oi.to_dict() if res.oi else None,
         "regime": res.regime.snapshot() if res.regime else None, "regime_notes": res.regime.notes if res.regime else [],
         "suggestions": [suggestion_payload(s, ctx, spot, source) for s in res.suggestions],

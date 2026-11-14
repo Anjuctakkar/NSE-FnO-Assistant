@@ -218,7 +218,7 @@ def main(argv: list[str] | None = None) -> int:
     asof = dt.date.fromisoformat(a.asof) if a.asof else bars[-1]["date"]
 
     if a.cmd == "suggest":
-        res = suggest(a.symbol, bars, prov, asof, cfg, mkt, cm)
+        res = suggest(a.symbol, bars, prov, asof, cfg, mkt, cm, expiry_count=2)
         if a.json:
             print(json.dumps([s.to_dict() for s in res.suggestions], indent=1))
         else:

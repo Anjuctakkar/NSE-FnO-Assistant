@@ -159,8 +159,19 @@ def market_context(rows: list[Row]) -> dict[str, Any]:
 
 
 def scan(store: BhavcopyStore, data: dict[str, list[dict[str, Any]]], asof: dt.date, strat: StrategyConfig = StrategyConfig(), mkt: MarketConfig = MarketConfig(),
-         cm: CostModel = CostModel(), scfg: ScanConfig = ScanConfig(), progress: Optional[Callable[[str], None]] = None) -> ScanResult:
+         cm: CostModel = CostModel(), scfg: ScanConfig = ScanConfig(), progress: Optional[Callable[[str], None]] = None,
+         selected_expiry: Optional[dt.date] = None) -> ScanResult:
     res = pass_one(data, asof, strat, mkt, scfg)
+    if selected_expiry is not None:
+        available = {r["symbol"] for r in store.read_day(asof)
+                     if r["inst"] == "OPT" and r["expiry"] == selected_expiry}
+        before = len(res.rows)
+        res.rows = [row for row in res.rows if row.symbol in available]
+        res.universe = len(available)
+        excluded = before - len(res.rows)
+        if excluded:
+            res.skipped["no contracts for selected expiry"] = excluded
+        res.market = market_context(res.rows)
     if not res.rows:
         return res
     cands = res.rows[:scfg.top_candidates]
@@ -174,7 +185,8 @@ def scan(store: BhavcopyStore, data: dict[str, list[dict[str, Any]]], asof: dt.d
     prov = BhavcopyProvider.from_rows(rows, {r.symbol: r.bars for r in cands}, mkt, iv_history={r.symbol: r.iv_history for r in cands})
     found: list[tuple[Suggestion, Row, list[dict[str, Any]]]] = []
     for r in cands:
-        out: SuggestResult = suggest(r.symbol, r.bars, prov, asof, strat, mkt, cm, top_n=3)
+        out: SuggestResult = suggest(r.symbol, r.bars, prov, asof, strat, mkt, cm, top_n=3,
+                                     selected_expiry=selected_expiry)
         if not out.suggestions:
             res.nothing_passed += 1
             continue

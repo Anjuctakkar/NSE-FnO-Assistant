@@ -54,6 +54,7 @@ def test_suggest_from_bhavcopy_returns_a_complete_strict_json_payload():
     ctx, _ = seeded_ctx()
     r = strict(first_with_suggestion(ctx))
     assert r["source"] == "bhavcopy" and r["regime"]["trend"] in ("bullish", "bearish", "neutral")
+    assert len(r["expiries"]) == 2
     assert any("settlement prices but no bid/ask" in n for n in r["data_notes"])
     assert any("underlying close recorded in the bhavcopy" in n for n in r["data_notes"])          # no cash bars supplied: say so
     s = r["suggestions"][0]
@@ -228,7 +229,9 @@ def test_issue_for_a_symbol_with_no_chain_and_for_no_expiry():
     res = SuggestResult("TEST", dt.date(2026, 1, 1), None, None, code="no_chain", note="x")
     assert service.data_issue(ctx, res, "TEST", "bhavcopy", dt.date(2026, 1, 1))["code"] == "no_chain"
     res.code = "no_expiry"
-    assert service.data_issue(ctx, res, "TEST", "bhavcopy", dt.date(2026, 1, 1))["code"] == "no_expiry"
+    issue = service.data_issue(ctx, res, "TEST", "bhavcopy", dt.date(2026, 1, 1))
+    assert issue["code"] == "no_expiry"
+    assert "12 to 45 day" not in issue["detail"] and "upcoming option expiry" in issue["detail"]
     res.code = "no_edge"
     assert service.data_issue(ctx, res, "TEST", "bhavcopy", dt.date(2026, 1, 1)) is None
 

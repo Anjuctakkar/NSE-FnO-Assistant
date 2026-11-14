@@ -57,6 +57,9 @@ class Backend:
     async def symbols(self, source: str) -> dict[str, Any]:
         return await asyncio.to_thread(service.list_symbols, self.ctx, source)
 
+    async def expiries(self, req: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(service.list_expiries, self.ctx, req)
+
     async def suggest(self, req: dict[str, Any]) -> dict[str, Any]:
         bars = await self._bars(req)
         async with self.heavy():
@@ -114,6 +117,10 @@ def build_router(backend: Backend, require_user, require_admin):
     @r.get("/symbols", dependencies=[Depends(require_user)])
     async def symbols(source: str = "bhavcopy"):
         return await call(backend.symbols(source))
+
+    @r.get("/expiries", dependencies=[Depends(require_user)])
+    async def expiries(source: str = "bhavcopy", asof: str = ""):
+        return await call(backend.expiries({"source": source, "asof": asof}))
 
     @r.post("/suggest", dependencies=[Depends(require_user)])
     async def suggest(payload: dict[str, Any]):

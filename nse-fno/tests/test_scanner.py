@@ -108,6 +108,24 @@ def test_the_scan_is_deterministic_and_reads_the_requested_day():
         raise AssertionError("expected ServiceError")
 
 
+def test_scan_uses_the_selected_expiry_for_its_top_10():
+    ctx = market()
+    asof = ctx.store.dates()[-1]
+    expiries = service.list_expiries(ctx, {"source": "bhavcopy", "asof": asof.isoformat()})["expiries"]
+    assert expiries
+    expiry = expiries[0]
+    r = service.run_scan(ctx, {"source": "bhavcopy", "min_score": 0, "top_n": 10, "expiry": expiry})
+    assert r["expiry"] == expiry and len(r["ideas"]) <= 10
+    assert all(i["structure"]["legs"][0]["expiry"] == expiry for i in r["ideas"])
+    assert len({i["symbol"] for i in r["ideas"]}) == len(r["ideas"])
+    try:
+        service.run_scan(ctx, {"source": "bhavcopy", "expiry": "1999-01-01"})
+    except service.ServiceError as e:
+        assert "No option contracts are available" in str(e)
+    else:
+        raise AssertionError("expected ServiceError for an expiry absent from stored data")
+
+
 def test_risk_budget_and_minimum_score_apply_to_the_scan():
     r = service.run_scan(market(), {"source": "bhavcopy", "min_score": 0, "risk_budget": 80000})
     for i in r["ideas"]:
