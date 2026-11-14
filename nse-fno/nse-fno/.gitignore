@@ -1,0 +1,7 @@
+# Never commit market data, logs or anything that could hold credentials.
+data/
+*.jsonl
+.env
+*.env
+__pycache__/
+*.pyc
