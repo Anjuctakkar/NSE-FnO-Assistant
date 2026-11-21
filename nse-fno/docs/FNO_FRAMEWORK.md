@@ -27,7 +27,7 @@ python -m fno serve --data-dir data              # the web UI at http://127.0.0.
 python -m fno suggest --source bhavcopy --symbol TCS --data-dir data --risk-budget 50000
 python -m fno backtest --source bhavcopy --symbol TCS --data-dir data      # add --random for the baseline
 python -m fno demo                               # everything on synthetic data, no files or network needed
-python tests/run_tests.py                        # 124 tests, offline, no pytest needed (pytest also works)
+python tests/run_tests.py                        # offline test suite, no pytest needed (pytest also works)
 python tests/ui_smoke.py                         # drives the real UI in Chromium (needs: pip install playwright)
 ```
 
@@ -162,8 +162,8 @@ suggestions and those you marked taken (`set_taken()`).
 4. **Daily closes only.** Intraday stop touches, gaps through a stop, and earnings or other events are not modelled
    (a stop can lose more than 1 R). No event calendar is built in.
 5. **Cash settlement in the simulator.** Stock options settle physically in reality; the plan exits early to avoid it.
-6. **Not verified against real NSE data.** All 124 tests run on synthetic data, hand calculations and a local server that
-   imitates NSE. See "Real data" above for exactly what that does and does not cover.
+6. **Not verified against real NSE data.** The automated suite uses synthetic data, hand calculations and local mocked
+   services. See "Real data" above for exactly what that does and does not cover.
 
 ## Real data: the NSE F&O bhavcopy connector (`fno/bhavcopy.py`)
 
@@ -260,6 +260,6 @@ fno/oi.py          open-interest analysis and score adjustment   fno/summary.py 
 fno/scanner.py     the two-pass market scan
 fno/service.py     JSON-in/JSON-out functions for any front end  fno/mcp_probe.py   list an MCP server's tools
 fno/server.py      standalone local web server                   fno/api.py         dashboard backend + router
-fno/static/        index.html, fno.js (the UI)                   fno/cli.py         command line
-tests/             124 tests + run_tests.py + ui_smoke.py         examples/          live_snapshot.py
+fno/chat.py        optional OpenAI / Anthropic / Gemini chat      fno/cli.py         command line
+fno/static/        index.html, fno.js (the UI)                   tests/             offline suite + UI smoke
 ```

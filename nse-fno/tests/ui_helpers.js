@@ -32,4 +32,28 @@ eq(u.filterIdeas(ideas, { bias: "bullish", kind: "credit" }).length, 1, "both fi
 eq(u.filterIdeas(ideas, { bias: "bearish", kind: "futures" }).length, 0, "no match gives an empty list");
 eq(u.filterIdeas(ideas, { bias: "bullish", kind: "debit" })[0].scan.bias, "bullish", "an idea with no scan block never matches a bias filter");
 eq([u.countWhere(ideas, "bias", "bullish"), u.countWhere(ideas, "kind", "credit"), u.countWhere(ideas, "bias", "neutral")], [2, 2, 1], "chip counts");
+eq(u.answerAppChat("Is Breeze connected?", { connection: "connected" }).includes("test in this page succeeded"), true, "chat reports the last Breeze connection test");
+eq(u.answerAppChat("What is the current quote?", { quote: { symbol: "TCS", ltp: 102.5, change: 2.5, change_pct: 0.025, timestamp: "10:15" } }).includes("LTP ₹102.5"), true, "chat reads the loaded quote");
+const chatIdea = {
+  symbol: "TCS", source: "bhavcopy", asof: "2026-11-20", score: 82, kind: "debit",
+  structure: { name: "Bull Call Spread", legs: [{ expiry: "2026-12-31" }] },
+  legs_detail: [{ side: 1, kind: "CE", strike: 100, price: 5 }],
+  risk: { max_loss: 500 }, exit_plan: { profit_target: 200, stop_loss: -100 },
+  reasons: ["Trend agrees", "Costs fit"]
+};
+const chatIdeaAnswer = u.answerAppChat("Explain my current trade idea", {
+  view: "stock", stock: { symbol: "TCS", source: "bhavcopy", asof: "2026-11-20", suggestions: [chatIdea] }
+});
+eq([chatIdeaAnswer.includes("Bull Call Spread"), chatIdeaAnswer.includes("BUY 100 call"), chatIdeaAnswer.includes("maximum loss: ₹500")],
+  [true, true, true], "chat summarizes the currently displayed strategy and risk");
+eq(u.answerAppChat("Show the RSI value", {
+  view: "stock", stock: { symbol: "TCS", regime: { rsi: 68 } }
+}).includes("RSI for TCS is 68"), true, "chat explains a displayed indicator value");
+eq(u.answerAppChat("What should I ask?", {}).includes("Try asking"), true, "chat gives supported prompt examples");
+eq(u.answerAppChat("How do I run a market scan?", {}).includes("Market scan"), true, "chat explains the UI workflow");
+eq(u.answerAppChat("Where do I enter my Breeze settings?", {}).includes("Settings"), true, "chat explains the settings UI");
+eq(u.answerAppChat("Is Breeze connected?", { connection: "connected" }).includes("Confidence: High"), true, "chat labels direct answers with brief confidence");
+const scoreExample = u.answerAppChat("Can you give a score example?", {});
+eq([scoreExample.includes("25 + IV fit 20"), scoreExample.includes("75/100"), scoreExample.includes("not a win probability"),
+  scoreExample.includes("separate first-pass ranking")], [true, true, true, true], "chat gives a brief, distinct scan and trade score example");
 process.exit(bad);

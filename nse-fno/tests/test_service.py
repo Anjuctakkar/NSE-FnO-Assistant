@@ -1,7 +1,10 @@
 import datetime as dt
 import json
+import math
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
     from .test_bhavcopy import as_zip, nse, udiff_csv
@@ -198,7 +201,10 @@ def test_import_and_sync_update_status_and_report_problems():
 def test_status_and_symbols():
     ctx, _ = seeded_ctx(days=70)
     st = strict(service.status(ctx))
+    assert isinstance(st["app_version"], str) and st["app_version"]
     assert st["bhavcopy"]["days"] == 70 and st["bhavcopy"]["symbols"] == 1 and len(st["bhavcopy"]["dates"]) == 70
+    assert st["current_date"] == dt.date.today().isoformat()
+    assert st["ltp_date"] == st["bhavcopy"]["last"]
     assert service.list_symbols(ctx, "bhavcopy")["symbols"] == ["TEST"]
     assert "DEMO" in service.list_symbols(ctx, "synthetic")["symbols"]
 
@@ -220,6 +226,128 @@ def test_a_genuine_no_trade_is_not_flagged_as_a_data_problem():
     ctx, _ = seeded_ctx(days=130)
     r = service.run_suggest(ctx, {"symbol": "TEST", "source": "bhavcopy", "min_score": 100})
     assert r["suggestions"] == [] and r["code"] in ("no_edge", "filtered") and r["issue"] is None
+
+
+def test_one_stock_expiry_list_and_selected_expiry_suggestions():
+    ctx, _ = seeded_ctx()
+    initial = first_with_suggestion(ctx)
+    asof = initial["asof"]
+    expiries = service.list_expiries(ctx, {"source": "bhavcopy", "asof": asof, "symbol": "TEST"})["expiries"]
+    assert expiries
+    selected = service.run_suggest(ctx, {"symbol": "TEST", "source": "bhavcopy", "asof": asof,
+                                         "expiry": expiries[-1], "min_score": 0})
+    assert selected["expiry"] == expiries[-1]
+    assert all(s["structure"]["legs"][0]["expiry"] == expiries[-1] for s in selected["suggestions"])
+    try:
+        service.run_suggest(ctx, {"symbol": "TEST", "source": "bhavcopy", "asof": asof,
+                                  "expiry": "1999-01-01"})
+    except service.ServiceError as e:
+        assert "No option chain" in str(e)
+    else:
+        raise AssertionError("expected ServiceError for an expiry absent from this symbol's data")
+
+
+def live_market_fixture(ctx, asof, expiry, count=70):
+    bars, options = [], {"call": [], "put": []}
+    start = dt.datetime.combine(asof, dt.time(9, 15))
+    for i in range(count):
+        stamp = start + dt.timedelta(minutes=5 * i)
+        close = 1000 * (1 + 0.00015 * i + 0.002 * math.sin(i / 5))
+        bars.append({"datetime": stamp.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "open": close - 0.5,
+                     "high": close + 1, "low": close - 1, "close": close})
+        t = max((expiry - stamp.date()).days, 1) / 365
+        for right, kind in (("call", "CE"), ("put", "PE")):
+            price = service.bs.bs_price(close, 1000, t, ctx.mkt.risk_free, ctx.mkt.div_yield, 0.30, kind)
+            options[right].append({"datetime": stamp.strftime("%Y-%m-%dT%H:%M:%S.000Z"), "close": round(price, 2)})
+    spot = bars[-1]["close"]
+    t = (expiry - asof).days / 365
+    chain = []
+    for strike in (900, 950, 1000, 1050, 1100):
+        for right, kind in (("call", "CE"), ("put", "PE")):
+            price = service.bs.bs_price(spot, strike, t, ctx.mkt.risk_free, ctx.mkt.div_yield, 0.30, kind)
+            chain.append({"strike_price": strike, "right": right, "ltp": price, "bid_price": max(0.05, price - 0.1),
+                          "offer_price": price + 0.1, "iv": 0.30, "open_interest": 1000,
+                          "total_quantity_traded": 100})
+
+    return SimpleNamespace(
+        get_stock_quote=lambda symbol: {"symbol": symbol, "ltp": spot, "timestamp": "09:15"},
+        get_intraday_bars=lambda *args: bars,
+        get_option_chain_records=lambda *args: chain,
+        get_option_history=lambda symbol, expiry_text, strike, right, *args: options[right],
+    )
+
+
+def test_breeze_live_suggest_uses_only_intraday_breeze_data_and_derives_iv_history():
+    ctx = service.Context(tempfile.mkdtemp())
+    asof = service._india_now().date()
+    expiry = asof + dt.timedelta(days=30)
+    market = live_market_fixture(ctx, asof, expiry)
+    with patch.object(service, "_breeze_client_from_request", return_value=market):
+        result = strict(service.run_suggest(ctx, {
+            "source": "breeze-live", "symbol": "TEST", "expiry": expiry.isoformat(), "min_score": 0,
+        }))
+    assert not ctx.store.dates()
+    assert result["source"] == "breeze-live" and result["asof"] == asof.isoformat()
+    assert result["issue"] is None and result["regime"] is not None
+    from fno.signals import realised_vol
+    expected = realised_vol([bar["close"] for bar in service._intraday_bars(market.get_intraday_bars())],
+                            20, service.BREEZE_BAR_PERIODS_PER_YEAR,
+                            [bar["date"] for bar in service._intraday_bars(market.get_intraday_bars())])
+    assert abs(result["regime"]["rv20"] - expected) < 0.0001
+    assert any("bhavcopy is not used" in note for note in result["data_notes"])
+    assert any("IV rank uses IV derived" in note for note in result["data_notes"])
+    assert any("estimate" in note and "lot size" in note for note in result["data_notes"])
+    assert result["config"]["allow_futures"] is False
+
+
+def test_breeze_live_short_history_is_reported_without_eod_fallback():
+    ctx = service.Context(tempfile.mkdtemp())
+    asof = service._india_now().date()
+    expiry = asof + dt.timedelta(days=30)
+    market = live_market_fixture(ctx, asof, expiry, count=20)
+    with patch.object(service, "_breeze_client_from_request", return_value=market):
+        result = strict(service.run_suggest(ctx, {
+            "source": "breeze-live", "symbol": "TEST", "expiry": expiry.isoformat(),
+        }))
+    assert result["issue"]["code"] == "insufficient_history"
+    assert result["issue"]["unit"] == "5-minute candles" and result["issue"]["have"] == 20
+    assert "No bhavcopy or EOD fallback" in result["issue"]["detail"]
+    assert not ctx.store.dates()
+
+
+def test_breeze_live_is_single_stock_only_and_not_backtestable():
+    ctx = service.Context(tempfile.mkdtemp())
+    for operation in (service.run_scan, service.run_backtest_req):
+        try:
+            operation(ctx, {"source": "breeze-live", "symbol": "TEST"})
+        except service.ServiceError as exc:
+            assert "Breeze-live" in str(exc)
+        else:
+            raise AssertionError("Breeze-live must not use whole-market or EOD replay paths")
+
+
+def test_breeze_live_surfaces_missing_server_credentials_as_an_upstream_error():
+    ctx = service.Context(tempfile.mkdtemp())
+    asof = service._india_now().date()
+    with patch.object(service, "_breeze_client_from_request",
+                      side_effect=service.MarketDataError("Configure BREEZE_API_KEY")):
+        try:
+            service.run_suggest(ctx, {"source": "breeze-live", "symbol": "TEST",
+                                      "expiry": (asof + dt.timedelta(days=30)).isoformat()})
+        except service.UpstreamServiceError as exc:
+            assert "Configure BREEZE_API_KEY" in str(exc)
+        else:
+            raise AssertionError("missing Breeze credentials must be surfaced as an upstream failure")
+
+
+def test_synthetic_one_stock_can_select_an_expiry():
+    ctx = service.Context(tempfile.mkdtemp())
+    req = {"source": "synthetic", "symbol": "ALPHA"}
+    expiries = service.list_expiries(ctx, req)["expiries"]
+    assert len(expiries) >= 2
+    result = service.run_suggest(ctx, {**req, "expiry": expiries[1], "min_score": 0})
+    assert result["expiry"] == expiries[1]
+    assert all(s["structure"]["legs"][0]["expiry"] == expiries[1] for s in result["suggestions"])
 
 
 def test_issue_for_a_symbol_with_no_chain_and_for_no_expiry():

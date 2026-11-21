@@ -62,6 +62,23 @@ def test_api_round_trip_on_synthetic_data():
         srv.shutdown()
 
 
+def test_live_quote_endpoint_calls_breeze_market_service():
+    from unittest.mock import patch
+
+    srv, base, ctx = start()
+    try:
+        with patch.object(service, "live_quote", return_value={"provider": "ICICI Breeze", "symbol": "TCS", "ltp": 2406.6}) as quote:
+            code, _, body = call(base + "/api/fno/live/quote?symbol=TCS")
+        assert code == 200 and json.loads(body)["ltp"] == 2406.6
+        quote.assert_called_once_with(ctx, {"symbol": "TCS"})
+        with patch.object(service, "live_quote", return_value={"provider": "ICICI Breeze", "symbol": "TCS", "ltp": 2406.6}) as quote:
+            code, _, body = call(base + "/api/fno/live/quote", {"symbol": "TCS", "session_token": "entered-token"})
+        assert code == 200 and json.loads(body)["ltp"] == 2406.6
+        quote.assert_called_once_with(ctx, {"symbol": "TCS", "session_token": "entered-token"})
+    finally:
+        srv.shutdown()
+
+
 def test_import_endpoint_accepts_raw_bytes_and_rejects_junk():
     srv, base, ctx = start()
     try:

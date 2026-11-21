@@ -1,0 +1,32 @@
+# Local environments
+.venv/
+venv/
+env/
+
+# Secrets and local configuration
+.env
+.env.*
+*.env
+
+# Python generated files
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and runtime data
+logs/
+*.log
+*.jsonl
+
+# Market data and generated datasets
+data/
+NSE-fnodata/
+nse-fnodata/

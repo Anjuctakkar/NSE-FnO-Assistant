@@ -69,6 +69,8 @@ def make_handler(ctx: service.Context, heavy: threading.Semaphore):
         def _run(self, fn, *args) -> None:
             try:
                 self._json(200, fn(*args))
+            except service.UpstreamServiceError as e:
+                self._json(502, {"detail": str(e)})
             except service.ServiceError as e:
                 self._json(400, {"detail": str(e)})
             except Exception:                                 # noqa: BLE001 - never leak internals to the page
@@ -87,12 +89,15 @@ def make_handler(ctx: service.Context, heavy: threading.Semaphore):
                 self._json(200, {"auth_enabled": False, "user": None})
             elif u.path == "/api/fno/status":
                 self._run(service.status, ctx)
+            elif u.path == "/api/fno/live/quote":
+                self._run(service.live_quote, ctx, {"symbol": parse_qs(u.query).get("symbol", [""])[0]})
             elif u.path == "/api/fno/symbols":
                 self._run(service.list_symbols, ctx, parse_qs(u.query).get("source", ["bhavcopy"])[0])
             elif u.path == "/api/fno/expiries":
                 query = parse_qs(u.query)
                 self._run(service.list_expiries, ctx, {"source": query.get("source", ["bhavcopy"])[0],
-                                                        "asof": query.get("asof", [""])[0]})
+                                                        "asof": query.get("asof", [""])[0],
+                                                        "symbol": query.get("symbol", [""])[0]})
             else:
                 self._json(404, {"detail": "Not found."})
 
@@ -113,13 +118,18 @@ def make_handler(ctx: service.Context, heavy: threading.Semaphore):
                 return self._json(400, {"detail": str(e)})
             routes = {"/api/fno/suggest": service.run_suggest, "/api/fno/backtest": service.run_backtest_req,
                       "/api/fno/evaluate": service.run_evaluate, "/api/fno/bhavcopy/sync": service.sync_bhavcopy,
-                      "/api/fno/scan": service.run_scan, "/api/fno/index": service.index_step}
+                      "/api/fno/scan": service.run_scan, "/api/fno/index": service.index_step,
+                      "/api/fno/live/quote": service.live_quote,
+                      "/api/fno/breeze/test": service.test_breeze_connection,
+                      "/api/fno/chat": service.run_chat}
             fn = routes.get(u.path)
             if fn is None:
                 return self._json(404, {"detail": "Not found."})
             if fn in (service.run_suggest, service.run_backtest_req, service.run_evaluate, service.run_scan, service.index_step):
                 with heavy:                                   # a few at a time: these are CPU-bound
                     return self._run(fn, ctx, req)
+            if fn in (service.test_breeze_connection, service.run_chat):
+                return self._run(fn, req)
             return self._run(fn, ctx, req)
 
     return Handler

@@ -270,16 +270,18 @@ class BhavcopyProvider:
 
 # ====================================================================== live snapshot
 class StaticProvider:
-    """One day's real chains (for example fetched from an MCP get_option_chain tool and converted with
-    chain_from_records) plus the stock's daily bars, so suggest() can run on live data.
+    """One day's real chain plus the supplied price bars, so suggest() can run on a live snapshot.
     iv_history is a list of past ATM IVs (oldest first) from any source; without it IV rank is unknown and treated as
     neutral (50), which the suggestions flag."""
     name = "static"
 
     def __init__(self, symbol: str, bars: list[dict[str, Any]], chains: dict[dt.date, Chain],
-                 iv_history: Optional[list[float]] = None, oi_context: Optional[OiContext] = None):
+                 iv_history: Optional[list[float]] = None, oi_context: Optional[OiContext] = None,
+                 periods_per_year: int = 252, snapshot_asof: Optional[dt.date] = None):
         self.symbol, self.bars, self.chains, self.iv_history = symbol, bars, chains, iv_history or []
         self._oi_ctx = oi_context
+        self.periods_per_year = periods_per_year
+        self.snapshot_asof = snapshot_asof
 
     def oi_context(self, symbol: str, asof: dt.date, expiry: dt.date) -> Optional[OiContext]:
         return self._oi_ctx
@@ -311,13 +313,13 @@ class StaticProvider:
 # ====================================================================== generic records (live MCP output etc.)
 _KEYS = {
     "strike": ["strike", "strikeprice", "strikepr", "strikepric"],
-    "kind": ["optiontype", "opttype", "type", "optiontyp", "optntp"],
+    "kind": ["optiontype", "opttype", "type", "optiontyp", "optntp", "right"],
     "ltp": ["ltp", "lastprice", "lastpricetraded", "last"],
-    "bid": ["bid", "bidprice", "buyprice1", "bidprice1"],
-    "ask": ["ask", "askprice", "sellprice1", "askprice1", "offer"],
+    "bid": ["bid", "bidprice", "buyprice1", "bidprice1", "bestbidprice"],
+    "ask": ["ask", "askprice", "sellprice1", "askprice1", "offer", "bestofferprice"],
     "iv": ["iv", "impliedvolatility", "impliedvol"],
     "oi": ["oi", "openinterest", "openint"],
-    "volume": ["volume", "totaltradedvolume", "tradedvolume", "totaltradedqty"],
+    "volume": ["volume", "totaltradedvolume", "tradedvolume", "totaltradedqty", "totalquantitytraded"],
 }
 
 
@@ -351,7 +353,8 @@ def chain_from_records(symbol: str, asof: dt.date, spot: float, expiry: dt.date,
             flat.append((None, rec))
     quotes: list[Quote] = []
     for kind, rec in flat:
-        kind = kind or str(_pick(rec, "kind") or "").upper()[:2]
+        raw_kind = str(kind or _pick(rec, "kind") or "").strip().casefold()
+        kind = {"call": "CE", "put": "PE"}.get(raw_kind, raw_kind.upper()[:2])
         strike, ltp = _num(_pick(rec, "strike")), _num(_pick(rec, "ltp"))
         if kind not in ("CE", "PE") or not strike or not ltp:
             continue

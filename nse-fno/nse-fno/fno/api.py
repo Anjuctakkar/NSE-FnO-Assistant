@@ -54,6 +54,9 @@ class Backend:
     async def status(self) -> dict[str, Any]:
         return await asyncio.to_thread(service.status, self.ctx)
 
+    async def live_quote(self, req: dict[str, Any]) -> dict[str, Any]:
+        return await asyncio.to_thread(service.live_quote, self.ctx, req)
+
     async def symbols(self, source: str) -> dict[str, Any]:
         return await asyncio.to_thread(service.list_symbols, self.ctx, source)
 
@@ -104,12 +107,22 @@ def build_router(backend: Backend, require_user, require_admin):
     async def call(coro):
         try:
             return await coro
+        except service.UpstreamServiceError as e:
+            raise HTTPException(502, str(e))
         except service.ServiceError as e:
             raise HTTPException(400, str(e))
 
     @r.get("/status", dependencies=[Depends(require_user)])
     async def status():
         return await call(backend.status())
+
+    @r.get("/live/quote", dependencies=[Depends(require_user)])
+    async def live_quote(symbol: str = ""):
+        return await call(backend.live_quote({"symbol": symbol}))
+
+    @r.post("/live/quote", dependencies=[Depends(require_user)])
+    async def live_quote_with_token(payload: dict[str, Any]):
+        return await call(backend.live_quote(payload))
 
     @r.get("/symbols", dependencies=[Depends(require_user)])
     async def symbols(source: str = "bhavcopy"):

@@ -1,19 +1,19 @@
 """
-Underlying and volatility regime, computed from daily bars (and an ATM-IV history when available).
+Underlying and volatility regime, computed from the provider's bars (daily in bhavcopy mode; five-minute in Breeze-live mode).
 
 Trend uses the same building blocks as the cash-market dashboard (SMA, RSI, MACD from technical.py, or the bundled
 copy in _technical.py when it is not installed beside the dashboard), scored on a
 -4..+4 scale so strength is visible, not just direction:
 
-    +1 / -1   20-day SMA above / below the 50-day SMA
-    +1 / -1   close above / below the 20-day SMA
+    +1 / -1   20-bar SMA above / below the 50-bar SMA
+    +1 / -1   close above / below the 20-bar SMA
     +1 / -1   MACD above / below its signal line
     +1 / -1 / 0   RSI 50-70 / 30-50 / outside (overbought or oversold: no vote)
 
     score >= +2 bullish, <= -2 bearish, otherwise neutral.
 
-Volatility regime: IV rank and IV percentile over up to a year of ATM IV, and the variance risk premium
-(ATM IV minus 20-day realised volatility). In synthetic mode "IV" is a realised-volatility proxy (see data.py).
+Volatility regime: IV rank and IV percentile over the available ATM-IV history, and the variance risk premium
+(ATM IV minus 20-bar realised volatility). In synthetic mode "IV" is a realised-volatility proxy (see data.py).
 """
 from __future__ import annotations
 
@@ -68,12 +68,21 @@ class Regime:
         return {k: (round(v, 4) if isinstance(v, float) else v) for k, v in d.items()}
 
 
-def realised_vol(closes: list[float], window: int) -> Optional[float]:
+def realised_vol(closes: list[float], window: int, periods_per_year: int = 252,
+                 sessions: Optional[list[dt.date]] = None) -> Optional[float]:
     if len(closes) < window + 1:
         return None
-    rets = [math.log(closes[i] / closes[i - 1]) for i in range(len(closes) - window, len(closes))]
+    rets = []
+    for i in range(len(closes) - 1, 0, -1):
+        if sessions is not None and sessions[i] != sessions[i - 1]:
+            continue
+        rets.append(math.log(closes[i] / closes[i - 1]))
+        if len(rets) == window:
+            break
+    if len(rets) < window:
+        return None
     m = sum(rets) / len(rets)
-    return math.sqrt(sum((x - m) ** 2 for x in rets) / (len(rets) - 1)) * math.sqrt(252)
+    return math.sqrt(sum((x - m) ** 2 for x in rets) / (len(rets) - 1)) * math.sqrt(periods_per_year)
 
 
 def atr(bars: list[dict[str, Any]], window: int = 14) -> float:
@@ -102,7 +111,7 @@ def iv_percentile(history: list[float], current: float) -> Optional[float]:
 
 
 def compute_regime(bars: list[dict[str, Any]], iv_history: Optional[list[float]] = None,
-                   iv_now: Optional[float] = None) -> Optional[Regime]:
+                   iv_now: Optional[float] = None, periods_per_year: int = 252) -> Optional[Regime]:
     """Regime as of the last bar. Uses only the bars given: pass bars[:i+1] in a backtest. None if too little data."""
     if len(bars) < MIN_BARS:
         return None
@@ -126,8 +135,10 @@ def compute_regime(bars: list[dict[str, Any]], iv_history: Optional[list[float]]
         notes.append(f"RSI {r:.0f} is oversold: trend-following shorts are extended.")
 
     a = atr(bars)
+    sessions = [b["date"] for b in bars] if periods_per_year > 252 else None
     reg = Regime(asof=bars[-1]["date"], spot=c, trend=trend, trend_score=score, rsi=r, macd_hist=ml - ms, sma20=a20,
-                 sma50=a50, atr=a, atr_pct=a / c * 100.0, rv20=realised_vol(closes, 20), rv60=realised_vol(closes, 60),
+                 sma50=a50, atr=a, atr_pct=a / c * 100.0, rv20=realised_vol(closes, 20, periods_per_year, sessions),
+                 rv60=realised_vol(closes, 60, periods_per_year, sessions),
                  swing_low=min(b["low"] for b in bars[-10:]), swing_high=max(b["high"] for b in bars[-10:]), notes=notes)
     if iv_now:
         reg.iv = iv_now

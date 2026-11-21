@@ -1,3 +1,4 @@
+import datetime as dt
 import os
 import random
 import subprocess
@@ -33,6 +34,17 @@ def test_bundled_indicators_match_the_dashboards_technical_py_exactly():
             assert mine.rsi(v, 14) == dash.rsi(v, 14)
             assert mine.macd(v) == dash.macd(v)
             assert mine.latest_value(v) == dash.latest_value(v)
+
+
+def test_intraday_realised_vol_excludes_overnight_close_to_open_gaps():
+    from fno.signals import realised_vol
+
+    sessions = [dt.date(2026, 1, 5), dt.date(2026, 1, 5), dt.date(2026, 1, 6), dt.date(2026, 1, 6)]
+    closes = [100.0, 101.0, 1000.0, 1010.0]
+    intraday = realised_vol(closes, 2, 100, sessions)
+    including_overnight = realised_vol(closes, 2, 100)
+    assert intraday is not None and intraday < 1e-8
+    assert including_overnight is not None and including_overnight > 1
 
 
 def run_clean(code, extra_path=None):

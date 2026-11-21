@@ -200,6 +200,8 @@ def test_status_and_symbols():
     ctx, _ = seeded_ctx(days=70)
     st = strict(service.status(ctx))
     assert st["bhavcopy"]["days"] == 70 and st["bhavcopy"]["symbols"] == 1 and len(st["bhavcopy"]["dates"]) == 70
+    assert st["current_date"] == dt.date.today().isoformat()
+    assert st["ltp_date"] == st["bhavcopy"]["last"]
     assert service.list_symbols(ctx, "bhavcopy")["symbols"] == ["TEST"]
     assert "DEMO" in service.list_symbols(ctx, "synthetic")["symbols"]
 

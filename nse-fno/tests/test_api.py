@@ -7,7 +7,7 @@ except ImportError:
     from test_service import first_with_suggestion, seeded_ctx, strict
 
 from fno import service
-from fno.api import Backend
+from fno.api import Backend, build_router
 
 
 class Counting:
@@ -96,3 +96,35 @@ def test_backend_runs_concurrent_requests_without_corrupting_each_other():
 
     results = asyncio.run(go())
     assert len({r["asof"] for r in results}) == 1 and len({len(r["suggestions"]) for r in results}) == 1
+
+
+def test_authenticated_api_exposes_breeze_connection_test():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from unittest.mock import patch
+
+    app = FastAPI()
+    backend = Backend(service.Context(tempfile.mkdtemp()))
+    app.include_router(build_router(backend, lambda: None, lambda: None))
+    credentials = {"api_key": "key", "api_secret": "secret", "session_token": "session"}
+    with patch.object(service, "test_breeze_connection", return_value={"ok": True, "message": "Connected."}) as test_connection:
+        response = TestClient(app).post("/api/fno/breeze/test", json=credentials)
+    assert response.status_code == 200 and response.json()["ok"] is True
+    test_connection.assert_called_once_with(credentials)
+
+
+def test_authenticated_api_exposes_model_chat():
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from unittest.mock import patch
+
+    app = FastAPI()
+    backend = Backend(service.Context(tempfile.mkdtemp()))
+    app.include_router(build_router(backend, lambda: None, lambda: None))
+    payload = {"provider": "openai", "model": "gpt-4.1-mini", "api_key": "temporary",
+               "messages": [{"role": "user", "content": "What is the quote?"}], "context": "TCS LTP ₹100"}
+    result = {"text": "TCS is at ₹100.", "provider": "openai", "model": "gpt-4.1-mini"}
+    with patch.object(service, "run_chat", return_value=result) as model_chat:
+        response = TestClient(app).post("/api/fno/chat", json=payload)
+    assert response.status_code == 200 and response.json() == result
+    model_chat.assert_called_once_with(payload)

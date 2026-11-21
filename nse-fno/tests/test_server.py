@@ -62,6 +62,53 @@ def test_api_round_trip_on_synthetic_data():
         srv.shutdown()
 
 
+def test_live_quote_endpoint_calls_breeze_market_service():
+    from unittest.mock import patch
+
+    srv, base, ctx = start()
+    try:
+        with patch.object(service, "live_quote", return_value={"provider": "ICICI Breeze", "symbol": "TCS", "ltp": 2406.6}) as quote:
+            code, _, body = call(base + "/api/fno/live/quote?symbol=TCS")
+        assert code == 200 and json.loads(body)["ltp"] == 2406.6
+        quote.assert_called_once_with(ctx, {"symbol": "TCS"})
+        with patch.object(service, "live_quote", return_value={"provider": "ICICI Breeze", "symbol": "TCS", "ltp": 2406.6}) as quote:
+            code, _, body = call(base + "/api/fno/live/quote", {"symbol": "TCS", "session_token": "entered-token"})
+        assert code == 200 and json.loads(body)["ltp"] == 2406.6
+        quote.assert_called_once_with(ctx, {"symbol": "TCS", "session_token": "entered-token"})
+    finally:
+        srv.shutdown()
+
+
+def test_breeze_connection_test_endpoint_forwards_credentials():
+    from unittest.mock import patch
+
+    srv, base, _ = start()
+    credentials = {"api_key": "key", "api_secret": "secret", "session_token": "session"}
+    try:
+        with patch.object(service, "test_breeze_connection", return_value={"ok": True, "message": "Connected."}) as test_connection:
+            code, _, body = call(base + "/api/fno/breeze/test", credentials)
+        assert code == 200 and json.loads(body)["ok"] is True
+        test_connection.assert_called_once_with(credentials)
+    finally:
+        srv.shutdown()
+
+
+def test_model_chat_endpoint_forwards_request():
+    from unittest.mock import patch
+
+    srv, base, _ = start()
+    payload = {"provider": "openai", "model": "gpt-4.1-mini", "api_key": "temporary",
+               "messages": [{"role": "user", "content": "What is the quote?"}], "context": "TCS LTP ₹100"}
+    result = {"text": "TCS is at ₹100.", "provider": "openai", "model": "gpt-4.1-mini"}
+    try:
+        with patch.object(service, "run_chat", return_value=result) as model_chat:
+            code, _, body = call(base + "/api/fno/chat", payload)
+        assert code == 200 and json.loads(body) == result
+        model_chat.assert_called_once_with(payload)
+    finally:
+        srv.shutdown()
+
+
 def test_import_endpoint_accepts_raw_bytes_and_rejects_junk():
     srv, base, ctx = start()
     try:
@@ -71,6 +118,8 @@ def test_import_endpoint_accepts_raw_bytes_and_rejects_junk():
         assert code == 200 and r["imported"]["date"] == "2026-10-01" and r["bhavcopy"]["days"] == 1
         assert json.loads(call(base + "/api/fno/status")[2])["bhavcopy"]["symbols"] == 1
         code, _, body = call(base + "/api/fno/expiries?asof=2026-10-01")
+        assert code == 200 and json.loads(body)["expiries"] == ["2026-10-27"]
+        code, _, body = call(base + "/api/fno/expiries?asof=2026-10-01&symbol=TEST")
         assert code == 200 and json.loads(body)["expiries"] == ["2026-10-27"]
         code, _, body = call(base + "/api/fno/bhavcopy/import?name=junk.csv", raw=b"a,b\n1,2\n", headers={"Content-Type": "application/octet-stream"})
         assert code == 400 and "junk.csv" in json.loads(body)["detail"]

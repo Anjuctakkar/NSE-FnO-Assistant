@@ -292,9 +292,11 @@
     <label class="first" for="fnoSource">Prices</label>
     <select id="fnoSource"><option value="bhavcopy">NSE F&amp;O bhavcopy (real)</option><option value="synthetic">Synthetic demo (not real)</option></select>
     <div class="hint" id="fnoStatus">Loading…</div>
+    <div class="hint" id="fnoDateInfo"></div>
     <div id="fnoDataReal"><label for="fnoHist">History to download</label>
       <select id="fnoHist"><option value="90">3 months (the minimum)</option><option value="180">6 months</option><option value="365" selected>1 year (recommended)</option></select>
-      <div class="btns"><button id="fnoSync" class="small" type="button">Sync from NSE</button><button id="fnoStop" class="small" type="button" hidden>Stop</button><button id="fnoImport" class="small" type="button">Import file…</button></div></div>
+      <div class="btns"><button id="fnoSyncLatest" class="small" type="button">Sync latest</button><button id="fnoSync" class="small" type="button">Sync history</button><button id="fnoStop" class="small" type="button" hidden>Stop</button><button id="fnoImport" class="small" type="button">Import file…</button></div>
+      <div class="hint">NSE F&amp;O bhavcopy contains end-of-day settlement data, not live or intraday quotes. Sync checks for newly published files.</div></div>
     <input type="file" id="fnoFile" accept=".zip,.csv" hidden />
     <div class="status" id="fnoDataMsg"></div>
   </div>
@@ -302,7 +304,12 @@
     <div class="seg" role="group" aria-label="What to look at"><button type="button" id="fnoModeMkt" class="on" aria-pressed="true">Whole market</button><button type="button" id="fnoModeOne" aria-pressed="false">One stock</button></div>
     <div class="hint" id="fnoModeHint">Scans every F&amp;O stock and ranks the best trades by Greeks and open interest. No stock needed.</div>
     <div id="fnoSymWrap" style="display:none"><label for="fnoSym">NSE symbol</label>
-      <input type="text" id="fnoSym" list="fnoSyms" placeholder="e.g. TCS" autocomplete="off" spellcheck="false" /><datalist id="fnoSyms"></datalist></div>
+      <input type="text" id="fnoSym" list="fnoSyms" placeholder="e.g. TCS" autocomplete="off" spellcheck="false" /><datalist id="fnoSyms"></datalist>
+      <label for="fnoBreezeSessionToken">ICICI Breeze session token</label>
+      <input type="password" id="fnoBreezeSessionToken" autocomplete="off" spellcheck="false" />
+      <div class="hint">Used for this browser session only; not saved. Leave blank to use BREEZE_SESSION_TOKEN from the server environment.</div>
+      <div class="btns"><button id="fnoLiveRefresh" class="small" type="button">Refresh live quote</button></div>
+      <div class="hint" id="fnoLiveQuote">ICICI Breeze quote is fetched on demand. F&amp;O suggestions continue to use stored bhavcopy data.</div></div>
     <label for="fnoAsof">As of</label>
     <select id="fnoAsof"><option value="">Latest day</option></select>
   </div>
@@ -335,6 +342,9 @@
   function renderStatus() {
     const b = S.status && S.status.bhavcopy, el = $("#fnoStatus");
     const real = S.source === "bhavcopy";
+    const currentDate = S.status && S.status.current_date;
+    const bhavcopyDate = S.status && S.status.ltp_date;
+    $("#fnoDateInfo").textContent = `Current date: ${currentDate ? fdate(currentDate) : "—"} · Latest bhavcopy settlement date: ${real ? (bhavcopyDate ? fdate(bhavcopyDate) : "not available") : "not applicable in synthetic mode"}`;
     $("#fnoDataReal").style.display = real ? "" : "none";
     $("#fnoIvWrap").style.display = real ? "none" : "";
     if (!real) { el.textContent = "Generated stocks (DEMO, ALPHA, BRAVO, CHARLIE) with Black-Scholes option prices. For trying the screens only."; }
@@ -365,10 +375,26 @@
     $("#fnoVol").value = S.source === "bhavcopy" ? ($("#fnoVol").value || 10) : 0;
   }
 
+  async function refreshLiveQuote() {
+    const symbol = val("#fnoSym").trim().toUpperCase(), button = $("#fnoLiveRefresh"), output = $("#fnoLiveQuote");
+    if (!symbol) { output.textContent = "Enter an NSE symbol first."; return; }
+    button.disabled = true;
+    output.textContent = `Fetching the ICICI Breeze live quote for ${symbol}…`;
+    try {
+      const q = await post("/live/quote", { symbol, session_token: val("#fnoBreezeSessionToken").trim() });
+      const change = fin(q.change) ? ` · change ${sgn(q.change, 2)} (${sgn(q.change_pct, 2)}%)` : "";
+      const range = ` · O ${inr(q.open, 2)} / H ${inr(q.high, 2)} / L ${inr(q.low, 2)}`;
+      output.textContent = `${q.symbol} (${q.provider || "ICICI Breeze"}) · LTP ${inr(q.ltp, 2)}${change}${range} · Breeze timestamp ${q.timestamp || "unavailable"}. Quote only; strategy inputs remain bhavcopy-based.`;
+    } catch (e) {
+      output.textContent = `Live quote unavailable: ${e.message}`;
+    } finally { button.disabled = false; }
+  }
+
   /** Downloads the chosen history, one window at a time so each request is short. Returns true when it finished without an error. */
-  async function doSync() {
-    const b = $("#fnoSync"), stop = $("#fnoStop"); S.syncStop = false; b.disabled = true; stop.hidden = false;
-    let body = { history_days: +val("#fnoHist") || 365 }, got = 0, holidays = 0, err = null, stopped = false, last = null, suspect = null;
+  async function doSync(initialBody = { history_days: +val("#fnoHist") || 365 }) {
+    const buttons = [$("#fnoSyncLatest"), $("#fnoSync")], stop = $("#fnoStop");
+    S.syncStop = false; buttons.forEach(button => { button.disabled = true; }); stop.hidden = false;
+    let body = initialBody, got = 0, holidays = 0, err = null, stopped = false, last = null, suspect = null;
     try {
       for (let i = 0; i < 80; i++) {
         say("#fnoDataMsg", busy(got ? `Downloaded ${got} days so far… (about a second a day)` : "Downloading from NSE… (about a second a day)"));
@@ -380,7 +406,7 @@
         if (S.syncStop) { stopped = true; break; }
         body = { start: r.next_start, end: r.end };
       }
-    } catch (e) { err = e.message; } finally { b.disabled = false; stop.hidden = true; }
+    } catch (e) { err = e.message; } finally { buttons.forEach(button => { button.disabled = false; }); stop.hidden = true; }
     const total = S.status && S.status.bhavcopy ? S.status.bhavcopy.days : 0;
     if (suspect) {
       const n = (suspect.counts || {}).no_file || 0;
@@ -812,6 +838,7 @@ ${cmpRow("Net P&amp;L", "total_net_pnl", sinr, m, rm)}${cmpRow("Profit factor", 
     host.innerHTML = shell();
     $("#fnoSource").addEventListener("change", async e => { S.source = e.target.value; renderStatus(); await loadSymbols(); });
     $("#fnoSync").addEventListener("click", () => doSync());
+    $("#fnoSyncLatest").addEventListener("click", () => doSync({}));
     $("#fnoStop").addEventListener("click", () => { S.syncStop = true; say("#fnoDataMsg", busy("Stopping after this batch…")); });
     $("#fnoImport").addEventListener("click", () => $("#fnoFile").click());
     $("#fnoFile").addEventListener("change", e => doImport(e.target.files[0]));
@@ -819,6 +846,8 @@ ${cmpRow("Net P&amp;L", "total_net_pnl", sinr, m, rm)}${cmpRow("Profit factor", 
     $("#fnoModeMkt").addEventListener("click", () => setMode("market"));
     $("#fnoModeOne").addEventListener("click", () => setMode("one"));
     $("#fnoRunBt").addEventListener("click", runBacktest);
+    $("#fnoSym").addEventListener("change", () => { $("#fnoLiveQuote").textContent = "ICICI Breeze quote is fetched on demand. F&O suggestions continue to use stored bhavcopy data."; });
+    $("#fnoLiveRefresh").addEventListener("click", refreshLiveQuote);
     $("#fnoSym").addEventListener("keydown", e => { if (e.key === "Enter") runSuggest(); });
     S.host.querySelectorAll(".fno-tabs button").forEach(b => b.addEventListener("click", () => setTab(b.dataset.t)));
     loadLog(); setMode("market"); renderBacktest(); renderLog(); loadStatus();

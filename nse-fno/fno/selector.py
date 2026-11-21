@@ -126,7 +126,8 @@ def make_exit_plan(s: Structure, stats: dict[str, Any], regime: Regime, cfg: Str
 
 # ------------------------------------------------------------------ evaluation of one structure
 def evaluate(s1: Structure, chain: Chain, regime: Regime, cfg: StrategyConfig, mkt: MarketConfig, cm: CostModel,
-             provider_name: str = "", oi: Optional[OiProfile] = None) -> tuple[Optional[Suggestion], Optional[str]]:
+             provider_name: str = "", oi: Optional[OiProfile] = None,
+             periods_per_year: int = 252) -> tuple[Optional[Suggestion], Optional[str]]:
     """Filter, size, score and explain one candidate (built for 1 lot). Returns (suggestion, None) or (None, reason)."""
     name = s1.name
     stats1 = s1.payoff_stats()
@@ -199,7 +200,7 @@ def evaluate(s1: Structure, chain: Chain, regime: Regime, cfg: StrategyConfig, m
     sc_greek = 5.0 if is_fut else 10.0      # futures: nothing for the Greeks to confirm
     if not is_fut and abs(g["gamma"]) > 1e-12 and abs(g["theta"]) > 1e-12 and regime.rv20:
         be_move = math.sqrt(2 * abs(g["theta"]) / abs(g["gamma"]))
-        ratio = (regime.rv20 / math.sqrt(252) * chain.spot) / be_move
+        ratio = (regime.rv20 / math.sqrt(periods_per_year) * chain.spot) / be_move
         sc_greek = 20 * (_clamp((1.3 - ratio) / 0.8) if g["theta"] > 0 else _clamp((ratio - 0.7) / 0.8))
     if name in CREDIT:
         sc_quality = 15 * _clamp((pop - 0.5) / 0.3)
@@ -308,11 +309,14 @@ def suggest(symbol: str, bars: list[dict[str, Any]], provider, asof: dt.date, cf
     if chain is None or not chain.quotes:
         res.code, res.note = "no_chain", "no option chain available"
         return res
-    regime = compute_regime(bars, provider.atm_iv_history(symbol, asof, 252), chain.atm_iv())
+    periods_per_year = getattr(provider, "periods_per_year", 252)
+    regime = compute_regime(bars, provider.atm_iv_history(symbol, asof, 252), chain.atm_iv(), periods_per_year)
     if regime is None:
         res.code, res.have_bars, res.need_bars = "insufficient_history", len(bars), 60
-        res.note = (f"only {len(bars)} trading days of price history: the trend rules need at least 60 (about three months) "
-                    f"and IV rank needs about a year")
+        unit = "5-minute candles" if getattr(provider, "name", "") == "breeze-live" else "trading days"
+        res.note = f"only {len(bars)} {unit} of price history: the trend rules need at least 60"
+        if getattr(provider, "name", "") != "breeze-live":
+            res.note += " (about three months) and IV rank needs about a year"
         return res
     if override_trend:
         regime.trend, regime.trend_score = override_trend, {"bullish": 2, "bearish": -2}.get(override_trend, 0)
@@ -331,7 +335,8 @@ def suggest(symbol: str, bars: list[dict[str, Any]], provider, asof: dt.date, cf
         if s is None:
             res.rejected.append((n, "could not build from this chain"))
             continue
-        sug, why = evaluate(s, chain, regime, cfg, mkt, cm, getattr(provider, "name", ""), res.oi)
+        sug, why = evaluate(s, chain, regime, cfg, mkt, cm, getattr(provider, "name", ""), res.oi,
+                            periods_per_year)
         if sug is None:
             res.rejected.append((n, why or "rejected"))
         elif sug.score < (cfg.futures_min_score if n in FUTURES else cfg.min_score):

@@ -7,18 +7,22 @@ Data sources
     "bhavcopy"   real NSE F&O settlement prices from the BhavcopyStore (sync or import first).
     "synthetic"  Black-Scholes prices over a generated stock (DEMO, ALPHA, ...): shows the screens and checks the code,
                  says nothing about the market.
+    "breeze-live" live Breeze cash/option quotes and 5-minute cash/option history; no bhavcopy fallback.
+    live_quote   ICICI Breeze cash-market LTP, displayed separately from bhavcopy suggestions.
 
-Cash-market bars (OHLC) for the technicals come from, in order: bars passed in (the dashboard supplies its adjusted
-history), a SYMBOL.csv in bars_dir, or, failing both, the underlying close recorded in the bhavcopy itself. That last
-fallback has no intraday high/low, so ATR and swing levels are close-to-close: a response says so when it applies.
+For bhavcopy mode, cash-market bars (OHLC) come from bars passed in (the dashboard supplies its adjusted history),
+a SYMBOL.csv in bars_dir, or, failing both, the underlying close recorded in the bhavcopy itself. That last fallback
+has no intraday high/low, so ATR and swing levels are close-to-close: a response says so when it applies. Breeze-live
+instead uses only the Breeze 5-minute history it fetches for that request.
 """
 from __future__ import annotations
 
 import datetime as dt
 import math
+import os
 import threading
 import zlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,13 +30,16 @@ from . import greeks as bs
 from .backtest import BacktestResult, edge_vs_random, run_backtest, summarize
 from .bhavcopy import BhavcopyStore
 from .config import CostModel, MarketConfig, StrategyConfig
-from .data import BhavcopyProvider, SyntheticProvider
+from .data import BhavcopyProvider, StaticProvider, SyntheticProvider, chain_from_records
 from .demo_data import bars_from_csv, make_synthetic_bars
 from .evaluate import evaluate_entries
+from .expiry import default_lot_size, monthly_expiries
 from .models import Structure, Suggestion
+from .breeze_market import BreezeMarketClient, MarketDataError
 from .scanner import ScanConfig, market_context, scan as market_scan
 from .selector import suggest
 from .summary import SummaryIndex
+from .version import APP_VERSION
 
 DEMO_SYMBOLS = ["DEMO", "ALPHA", "BRAVO", "CHARLIE"]
 MAX_SYNC_DAYS = 21          # calendar days per request: about 15 downloads, short enough for a proxy's timeout
@@ -40,10 +47,17 @@ MIN_HISTORY_DAYS = 60       # the trend rules need this many trading days of pri
 RECOMMENDED_HISTORY_DAYS = 250   # IV rank wants about a year
 DEFAULT_HISTORY_CALENDAR_DAYS = 365
 MAX_EVAL_ENTRIES = 300
+BREEZE_HISTORY_DAYS = 7
+BREEZE_BAR_PERIODS_PER_YEAR = 252 * 75
+BREEZE_INTERVAL = "5minute"
 
 
 class ServiceError(Exception):
     """A problem the user can act on; the message is safe to show."""
+
+
+class UpstreamServiceError(ServiceError):
+    """A temporary failure while retrieving data from an external service."""
 
 
 @dataclass
@@ -55,6 +69,8 @@ class Context:
     store: Optional[BhavcopyStore] = None
     _cache: dict = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _breeze_market: Optional[BreezeMarketClient] = field(default=None, repr=False)
+    _breeze_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir)
@@ -97,9 +113,9 @@ def _sym(req: dict[str, Any]) -> str:
 
 
 def _source(req: dict[str, Any]) -> str:
-    s = str(req.get("source", "bhavcopy")).lower()
-    if s not in ("bhavcopy", "synthetic"):
-        raise ServiceError("source must be 'bhavcopy' or 'synthetic'.")
+    s = str(req.get("source", "bhavcopy")).strip().lower()
+    if s not in ("bhavcopy", "synthetic", "breeze-live"):
+        raise ServiceError("source must be 'bhavcopy', 'synthetic' or 'breeze-live'.")
     return s
 
 
@@ -122,6 +138,149 @@ def bars_from_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
     out.sort(key=lambda b: b["date"])
     return out
+
+
+def _breeze_date_time(value: dt.datetime) -> str:
+    return value.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _india_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone(dt.timedelta(hours=5, minutes=30)))
+
+
+def _breeze_expiry(value: dt.date) -> str:
+    return value.strftime("%Y-%m-%dT00:00:00.000Z")
+
+
+def _breeze_history_range() -> tuple[str, str]:
+    end = _india_now().replace(tzinfo=None)
+    start = (end - dt.timedelta(days=BREEZE_HISTORY_DAYS)).replace(hour=9, minute=15, second=0, microsecond=0)
+    return _breeze_date_time(start), _breeze_date_time(end)
+
+
+def _candle_datetime(record: dict[str, Any]) -> Optional[dt.datetime]:
+    values = {str(k).strip().lower(): v for k, v in record.items()}
+    raw = values.get("datetime") or values.get("date")
+    if not raw:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(raw).strip().replace("Z", "")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _candle_number(record: dict[str, Any], key: str) -> Optional[float]:
+    raw = {str(k).strip().lower(): v for k, v in record.items()}.get(key)
+    try:
+        value = float(str(raw).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+def _intraday_bars(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_time: dict[dt.datetime, dict[str, Any]] = {}
+    for record in records:
+        stamp = _candle_datetime(record)
+        close = _candle_number(record, "close")
+        if stamp is None or close is None:
+            continue
+        by_time[stamp] = {
+            "date": stamp.date(),
+            "timestamp": stamp,
+            "open": _candle_number(record, "open") or close,
+            "high": _candle_number(record, "high") or close,
+            "low": _candle_number(record, "low") or close,
+            "close": close,
+        }
+    return [by_time[stamp] for stamp in sorted(by_time)]
+
+
+def _option_iv_history(ctx: Context, expiry: dt.date, strike: float, underlying: list[dict[str, Any]],
+                       option_records: dict[str, list[dict[str, Any]]]) -> list[float]:
+    underlying_closes = {bar["timestamp"]: bar["close"] for bar in underlying}
+    iv_by_time: dict[dt.datetime, list[float]] = {}
+    for right, kind in (("call", "CE"), ("put", "PE")):
+        for bar in _intraday_bars(option_records.get(right, [])):
+            spot = underlying_closes.get(bar["timestamp"])
+            if spot is None:
+                continue
+            time_to_expiry = max((expiry - bar["date"]).days, 1) / 365.0
+            iv = bs.implied_vol(bar["close"], spot, strike, time_to_expiry, ctx.mkt.risk_free, ctx.mkt.div_yield, kind)
+            if iv is not None:
+                iv_by_time.setdefault(bar["timestamp"], []).append(iv)
+    return [sum(values) / len(values) for _, values in sorted(iv_by_time.items())]
+
+
+def _live_lot_size(ctx: Context, symbol: str, spot: float, records: list[dict[str, Any]]) -> tuple[int, bool]:
+    configured = ctx.mkt.lot_sizes.get(symbol)
+    if configured:
+        return int(configured), False
+    for record in records:
+        normalized = {str(key).strip().lower(): value for key, value in record.items()}
+        for key in ("lot_size", "market_lot", "market_lot_size"):
+            try:
+                lot = int(float(normalized.get(key) or 0))
+            except (TypeError, ValueError):
+                lot = 0
+            if lot > 0:
+                return lot, False
+    return default_lot_size(spot, ctx.mkt.lot_target_value), True
+
+
+def breeze_live_provider(ctx: Context, req: dict[str, Any], symbol: str, expiry: dt.date) -> tuple[StaticProvider, list[dict[str, Any]], list[str]]:
+    asof = _india_now().date()
+    from_date, to_date = _breeze_history_range()
+    expiry_arg = _breeze_expiry(expiry)
+    try:
+        market = _breeze_client_from_request(req)
+        quote = market.get_stock_quote(symbol)
+        spot = quote["ltp"]
+        bars = _intraday_bars(market.get_intraday_bars(symbol, from_date, to_date, BREEZE_INTERVAL))
+        chain_records = market.get_option_chain_records(symbol, expiry_arg)
+    except MarketDataError as exc:
+        raise UpstreamServiceError(str(exc)) from exc
+    if not bars:
+        raise UpstreamServiceError(
+            f"Breeze returned no 5-minute cash candles for {symbol} in the last {BREEZE_HISTORY_DAYS} days. "
+            "No strategy was generated and bhavcopy data was not used."
+        )
+    lot_size, estimated_lot = _live_lot_size(ctx, symbol, spot, chain_records)
+    chain = chain_from_records(symbol, asof, spot, expiry, chain_records, lot_size, ctx.mkt)
+    if not chain.quotes:
+        raise UpstreamServiceError(f"Breeze returned no usable {symbol} option quotes for expiry {expiry}.")
+    notes = [
+        "Strategy inputs use the current Breeze cash quote and option chain plus Breeze 5-minute cash candles; bhavcopy is not used.",
+        "SMA, RSI, MACD, ATR and realised volatility are calculated on 5-minute candles (indicator periods are candles, not days).",
+        "Realised volatility is annualised using 75 five-minute candles per regular session; overnight gaps are excluded.",
+        "IV rank uses IV derived from historical 5-minute candles for the current ATM strike and expiry, limited to history Breeze returns; it is not a one-year daily IV rank.",
+        "Open interest and volume are the current option-chain snapshot, not historical buildup data.",
+    ]
+    if quote.get("timestamp"):
+        notes.append(f"Breeze cash-quote timestamp: {quote['timestamp']}.")
+    if estimated_lot:
+        notes.append(f"Breeze did not provide a lot size for {symbol}; sizing uses an estimate of {lot_size} units. Verify the current NSE lot size.")
+    iv_history: list[float] = []
+    if len(bars) >= 60:
+        options: dict[str, list[dict[str, Any]]] = {}
+        for right in ("call", "put"):
+            try:
+                options[right] = market.get_option_history(symbol, expiry_arg, chain.atm_strike(), right,
+                                                           from_date, to_date, BREEZE_INTERVAL)
+            except MarketDataError as exc:
+                if "checksum" in str(exc).casefold():
+                    raise UpstreamServiceError(str(exc)) from exc
+                notes.append(f"Breeze {right}-option IV history unavailable: {exc}")
+                options[right] = []
+        iv_history = _option_iv_history(ctx, expiry, chain.atm_strike(), bars, options)
+    else:
+        notes.append(f"Breeze returned {len(bars)} 5-minute candles; at least 60 are needed before IV history is requested.")
+    if not iv_history:
+        notes.append("No aligned historical ATM option prices were available to derive IV history; IV rank is unknown.")
+    provider = StaticProvider(symbol, bars, {expiry: chain}, iv_history,
+                              periods_per_year=BREEZE_BAR_PERIODS_PER_YEAR, snapshot_asof=asof)
+    provider.name = "breeze-live"
+    return provider, bars, notes
 
 
 def demo_bars(symbol: str) -> list[dict[str, Any]]:
@@ -147,6 +306,8 @@ def _load_csv_bars(ctx: Context, symbol: str) -> Optional[list[dict[str, Any]]]:
 def get_provider(ctx: Context, source: str, symbol: str, bars: Optional[list[dict[str, Any]]], iv_scale: float = 1.0):
     """(provider, bars, notes). notes are caveats the UI must show next to any result built on this data."""
     notes: list[str] = []
+    if source == "breeze-live":
+        raise ServiceError("Breeze-live strategies require a current request; historical and scan paths cannot use this source.")
     if source == "synthetic":
         if symbol not in DEMO_SYMBOLS:
             raise ServiceError(f"Synthetic mode only has {', '.join(DEMO_SYMBOLS)}.")
@@ -184,6 +345,9 @@ def get_provider(ctx: Context, source: str, symbol: str, bars: Optional[list[dic
 
 
 def _asof(prov, symbol: str, req: dict[str, Any], bars: list[dict[str, Any]]) -> dt.date:
+    snapshot_asof = getattr(prov, "snapshot_asof", None)
+    if snapshot_asof is not None and not req.get("asof"):
+        return snapshot_asof
     avail = sorted(prov._dates[symbol]) if isinstance(prov, BhavcopyProvider) else [b["date"] for b in bars]
     if not avail:
         raise ServiceError(f"No data for {symbol}.")
@@ -255,11 +419,79 @@ def status(ctx: Context) -> dict[str, Any]:
     dates = ctx.store.dates()
     n = cov["days"]
     missing = len(SummaryIndex(ctx.store, ctx.mkt).missing_days()) if n else 0
-    return jsonable({"bhavcopy": {**cov, "index_missing": missing, "dates": [d.isoformat() for d in dates[-90:]], "symbols": len(ctx.store.symbols()),
+    return jsonable({"app_version": APP_VERSION, "current_date": dt.date.today(), "ltp_date": dates[-1] if dates else None,
+                     "bhavcopy": {**cov, "index_missing": missing, "dates": [d.isoformat() for d in dates[-90:]], "symbols": len(ctx.store.symbols()),
                                   "url_templates": ctx.store.url_templates, "min_days": MIN_HISTORY_DAYS, "recommended_days": RECOMMENDED_HISTORY_DAYS,
                                   "readiness": "empty" if n == 0 else "too_short" if n < MIN_HISTORY_DAYS else "thin" if n < RECOMMENDED_HISTORY_DAYS - 50 else "good"},
                      "demo_symbols": DEMO_SYMBOLS, "bars_dir": str(ctx.bars_dir), "has_cash_bars": ctx.bars_dir.exists(),
                      "disclaimer": "Information only, not investment advice."})
+
+
+def live_quote(ctx: Context, req: dict[str, Any]) -> dict[str, Any]:
+    symbol = _sym(req)
+    session_token = req.get("session_token")
+    if session_token is not None:
+        if not isinstance(session_token, str):
+            raise ServiceError("Breeze session token must be text.")
+        session_token = session_token.strip()
+        if len(session_token) > 1024:
+            raise ServiceError("Breeze session token is too long.")
+    if req.get("api_key") not in (None, "") or req.get("api_secret") not in (None, ""):
+        market = _breeze_client_from_request(req)
+        try:
+            return jsonable(market.get_stock_quote(symbol))
+        except MarketDataError as exc:
+            raise UpstreamServiceError(str(exc)) from exc
+    try:
+        with ctx._breeze_lock:
+            configured_token = session_token or os.environ.get("BREEZE_SESSION_TOKEN", "").strip()
+            if (ctx._breeze_market is None
+                    or ctx._breeze_market.session_token != configured_token
+                    or ctx._breeze_market.api_key != os.environ.get("BREEZE_API_KEY", "").strip()
+                    or ctx._breeze_market.api_secret != os.environ.get("BREEZE_API_SECRET", "").strip()):
+                ctx._breeze_market = BreezeMarketClient.from_env(session_token=session_token) if session_token else BreezeMarketClient.from_env()
+            market = ctx._breeze_market
+        return jsonable(market.get_stock_quote(symbol))
+    except MarketDataError as exc:
+        raise UpstreamServiceError(str(exc)) from exc
+
+
+def _breeze_client_from_request(req: dict[str, Any]) -> BreezeMarketClient:
+    labels = {"api_key": "API key", "api_secret": "API secret", "session_token": "session token"}
+    values = {}
+    for name, label in labels.items():
+        value = req.get(name, "")
+        if not isinstance(value, str):
+            raise ServiceError(f"Breeze {label} must be text.")
+        value = value.strip()
+        if len(value) > 1024:
+            raise ServiceError(f"Breeze {label} is too long.")
+        values[name] = value
+    missing = [labels[name] for name, value in values.items() if not value]
+    if not any(values.values()):
+        return BreezeMarketClient.from_env()
+    if missing:
+        raise ServiceError("Enter the Breeze " + ", ".join(missing) + ".")
+    return BreezeMarketClient(values["api_key"], values["api_secret"], values["session_token"])
+
+
+def test_breeze_connection(req: dict[str, Any]) -> dict[str, Any]:
+    market = _breeze_client_from_request(req)
+    try:
+        market.test_connection()
+    except MarketDataError as exc:
+        raise UpstreamServiceError(str(exc)) from exc
+    return {"ok": True, "message": "Connected to ICICI Breeze."}
+
+
+def run_chat(req: dict[str, Any]) -> dict[str, str]:
+    from .chat import ChatError, run
+
+    try:
+        return run(req)
+    except ChatError as e:
+        error = UpstreamServiceError if e.upstream else ServiceError
+        raise error(str(e)) from None
 
 
 def list_symbols(ctx: Context, source: str) -> dict[str, Any]:
@@ -268,15 +500,35 @@ def list_symbols(ctx: Context, source: str) -> dict[str, Any]:
 
 def list_expiries(ctx: Context, req: dict[str, Any]) -> dict[str, Any]:
     source = _source(req)
-    if source == "synthetic" or not ctx.store.dates():
+    symbol = str(req.get("symbol", "")).strip().upper()
+    if source == "breeze-live":
+        if symbol:
+            symbol = _sym({"symbol": symbol})
+        asof = _india_now().date()
+        return jsonable({"source": source, "symbol": symbol, "asof": asof,
+                         "expiries": monthly_expiries(asof, 12, ctx.mkt)})
+    if source == "synthetic":
+        symbol = symbol or DEMO_SYMBOLS[0]
+        prov, bars, _ = get_provider(ctx, source, symbol, None, _f(req, "iv_scale", 1.0, 0.5, 2.0))
+        asof = _asof(prov, symbol, req, bars)
+        expiries = prov.expiries(symbol, asof, 12)
+        return jsonable({"source": source, "symbol": symbol, "asof": asof, "expiries": expiries})
+    if not ctx.store.dates():
         return {"source": source, "asof": None, "expiries": []}
     asof = _store_asof(ctx, req)
-    expiries = sorted({r["expiry"] for r in ctx.store.read_day(asof)
+    if symbol:
+        symbol = _sym({"symbol": symbol})
+    expiries = sorted({r["expiry"] for r in ctx.store.read_day(asof, {symbol} if symbol else None)
                        if r["inst"] == "OPT" and r["expiry"] > asof})
     return jsonable({"source": source, "asof": asof, "expiries": expiries})
 
 
 def history_issue(ctx: Context, symbol: str, source: str, have: int, need: int, title: Optional[str] = None, file_hint: bool = True) -> dict[str, Any]:
+    if source == "breeze-live":
+        return {"code": "insufficient_history", "title": title or f"Not enough 5-minute history for {symbol}",
+                "have": have, "need": need, "unit": "5-minute candles", "recommended": need, "fix": None,
+                "detail": f"Breeze returned {have} usable 5-minute candles for {symbol}; the trend rules need at least {need}. "
+                          "No bhavcopy or EOD fallback was used."}
     stored = len(ctx.store.dates()) if source == "bhavcopy" else None
     where = f"Only {have} trading days of prices were available for {symbol}" + (f" ({stored} days of bhavcopy are stored)." if stored is not None else ".")
     return {"code": "insufficient_history", "title": title or f"Not enough price history for {symbol}", "have": have, "need": need,
@@ -296,18 +548,34 @@ def data_issue(ctx: Context, res, symbol: str, source: str, asof: dt.date) -> Op
         return {"code": res.code, "title": f"No option chain for {symbol} on {asof}", "fix": None,
                 "detail": f"There are no option contracts for {symbol} on {asof}: it may not trade in F&O, or that day is missing from the stored data."}
     if res.code == "no_expiry":
-        return {"code": res.code, "title": "No suitable expiry", "fix": None,
-                "detail": f"No monthly expiry falls inside the 12 to 45 day window on {asof}. Try another date."}
+        return {"code": res.code, "title": "No upcoming expiry", "fix": None,
+                "detail": f"No upcoming option expiry is available for {symbol} on {asof}."}
     return None
 
 
 def run_suggest(ctx: Context, req: dict[str, Any], bars: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     symbol, source = _sym(req), _source(req)
     iv_scale = _f(req, "iv_scale", 1.0, 0.5, 2.0)
-    prov, bars, notes = get_provider(ctx, source, symbol, bars, iv_scale)
-    asof = _asof(prov, symbol, req, bars)
     cfg = strategy_config(req)
-    res = suggest(symbol, bars, prov, asof, cfg, ctx.mkt, ctx.cm, top_n=int(_f(req, "top_n", 3, 1, 6)))
+    selected_expiry = _parse_day(req.get("expiry"), "expiry")
+    if source == "breeze-live":
+        if req.get("asof"):
+            raise ServiceError("The Breeze-live source always uses the current session; remove the historical as-of date.")
+        asof = _india_now().date()
+        if selected_expiry is None:
+            selected_expiry = next((expiry for expiry in monthly_expiries(asof, 12, ctx.mkt)
+                                    if cfg.min_dte <= (expiry - asof).days <= cfg.max_dte), None)
+        if selected_expiry is None or selected_expiry <= asof:
+            raise ServiceError("Select an upcoming Breeze option expiry.")
+        prov, bars, notes = breeze_live_provider(ctx, req, symbol, selected_expiry)
+        cfg = replace(cfg, allow_futures=False)
+    else:
+        prov, bars, notes = get_provider(ctx, source, symbol, bars, iv_scale)
+        asof = _asof(prov, symbol, req, bars)
+    if selected_expiry is not None and selected_expiry not in prov.expiries(symbol, asof, 100):
+        raise ServiceError(f"No option chain for {symbol} on {asof} has expiry {selected_expiry}.")
+    res = suggest(symbol, bars, prov, asof, cfg, ctx.mkt, ctx.cm, top_n=int(_f(req, "top_n", 3, 1, 6)),
+                  selected_expiry=selected_expiry)
     spot = prov.spot(symbol, asof) or 0.0
     issue = data_issue(ctx, res, symbol, source, asof)
     if issue and issue["code"] == "insufficient_history":
@@ -340,6 +608,8 @@ TRADE_FIELDS = ("strategy", "entry_date", "exit_date", "exit_reason", "lots", "d
 
 def run_backtest_req(ctx: Context, req: dict[str, Any], bars: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
     symbol, source = _sym(req), _source(req)
+    if source == "breeze-live":
+        raise ServiceError("Backtests require historical option-chain snapshots; Breeze-live is available for current single-stock ideas only.")
     iv_scale = _f(req, "iv_scale", 1.0, 0.5, 2.0)
     prov, bars, notes = get_provider(ctx, source, symbol, bars, iv_scale)
     if len(bars) < MIN_HISTORY_DAYS + 20:                      # 60 days warm the indicators; a backtest needs room after that
@@ -473,6 +743,8 @@ def run_scan(ctx: Context, req: dict[str, Any], bars: Optional[list[dict[str, An
     """Suggest trades across the whole market. No stock is needed: every F&O stock is shortlisted from the summary index, and the
     shortlist gets the full Greeks and open-interest evaluation."""
     source = _source(req)
+    if source == "breeze-live":
+        raise ServiceError("Breeze-live supports one stock at a time; use Suggest trades instead of a whole-market scan.")
     cfg = strategy_config(req)
     top_n = int(_f(req, "top_n", 10, 1, 25))
     if source == "synthetic":

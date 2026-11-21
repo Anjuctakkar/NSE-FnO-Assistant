@@ -7,6 +7,7 @@ Data sources
     "bhavcopy"   real NSE F&O settlement prices from the BhavcopyStore (sync or import first).
     "synthetic"  Black-Scholes prices over a generated stock (DEMO, ALPHA, ...): shows the screens and checks the code,
                  says nothing about the market.
+    live_quote  ICICI Breeze cash-market LTP, displayed separately; it is not substituted into F&O calculations.
 
 Cash-market bars (OHLC) for the technicals come from, in order: bars passed in (the dashboard supplies its adjusted
 history), a SYMBOL.csv in bars_dir, or, failing both, the underlying close recorded in the bhavcopy itself. That last
@@ -16,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import os
 import threading
 import zlib
 from dataclasses import dataclass, field
@@ -30,6 +32,7 @@ from .data import BhavcopyProvider, SyntheticProvider
 from .demo_data import bars_from_csv, make_synthetic_bars
 from .evaluate import evaluate_entries
 from .models import Structure, Suggestion
+from .breeze_market import BreezeMarketClient, MarketDataError
 from .scanner import ScanConfig, market_context, scan as market_scan
 from .selector import suggest
 from .summary import SummaryIndex
@@ -46,6 +49,10 @@ class ServiceError(Exception):
     """A problem the user can act on; the message is safe to show."""
 
 
+class UpstreamServiceError(ServiceError):
+    """A temporary failure while retrieving data from an external service."""
+
+
 @dataclass
 class Context:
     data_dir: Path
@@ -55,6 +62,8 @@ class Context:
     store: Optional[BhavcopyStore] = None
     _cache: dict = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
+    _breeze_market: Optional[BreezeMarketClient] = field(default=None, repr=False)
+    _breeze_lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def __post_init__(self) -> None:
         self.data_dir = Path(self.data_dir)
@@ -255,11 +264,35 @@ def status(ctx: Context) -> dict[str, Any]:
     dates = ctx.store.dates()
     n = cov["days"]
     missing = len(SummaryIndex(ctx.store, ctx.mkt).missing_days()) if n else 0
-    return jsonable({"bhavcopy": {**cov, "index_missing": missing, "dates": [d.isoformat() for d in dates[-90:]], "symbols": len(ctx.store.symbols()),
+    return jsonable({"current_date": dt.date.today(), "ltp_date": dates[-1] if dates else None,
+                     "bhavcopy": {**cov, "index_missing": missing, "dates": [d.isoformat() for d in dates[-90:]], "symbols": len(ctx.store.symbols()),
                                   "url_templates": ctx.store.url_templates, "min_days": MIN_HISTORY_DAYS, "recommended_days": RECOMMENDED_HISTORY_DAYS,
                                   "readiness": "empty" if n == 0 else "too_short" if n < MIN_HISTORY_DAYS else "thin" if n < RECOMMENDED_HISTORY_DAYS - 50 else "good"},
                      "demo_symbols": DEMO_SYMBOLS, "bars_dir": str(ctx.bars_dir), "has_cash_bars": ctx.bars_dir.exists(),
                      "disclaimer": "Information only, not investment advice."})
+
+
+def live_quote(ctx: Context, req: dict[str, Any]) -> dict[str, Any]:
+    symbol = _sym(req)
+    session_token = req.get("session_token")
+    if session_token is not None:
+        if not isinstance(session_token, str):
+            raise ServiceError("Breeze session token must be text.")
+        session_token = session_token.strip()
+        if len(session_token) > 1024:
+            raise ServiceError("Breeze session token is too long.")
+    try:
+        with ctx._breeze_lock:
+            configured_token = session_token or os.environ.get("BREEZE_SESSION_TOKEN", "").strip()
+            if (ctx._breeze_market is None
+                    or ctx._breeze_market.session_token != configured_token
+                    or ctx._breeze_market.api_key != os.environ.get("BREEZE_API_KEY", "").strip()
+                    or ctx._breeze_market.api_secret != os.environ.get("BREEZE_API_SECRET", "").strip()):
+                ctx._breeze_market = BreezeMarketClient.from_env(session_token=session_token) if session_token else BreezeMarketClient.from_env()
+            market = ctx._breeze_market
+        return jsonable(market.get_stock_quote(symbol))
+    except MarketDataError as exc:
+        raise UpstreamServiceError(str(exc)) from exc
 
 
 def list_symbols(ctx: Context, source: str) -> dict[str, Any]:

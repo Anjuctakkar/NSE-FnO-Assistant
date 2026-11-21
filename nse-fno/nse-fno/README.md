@@ -13,6 +13,8 @@ python -m fno demo                           # end to end in the terminal on syn
 python tests/run_tests.py                    # 124 tests, offline, no pytest needed
 ```
 
+The NSE bhavcopy sync downloads published F&O settlement files (end-of-day, not live). In **One stock**, enter your ICICI Breeze session token (or configure `BREEZE_SESSION_TOKEN` in the server environment) and choose **Refresh live quote** to request the latest cash-market quote. Install the optional SDK with `python -m pip install -r requirements-live.txt` and set `BREEZE_API_KEY` and `BREEZE_API_SECRET` in the server environment. A token entered in the UI is sent only with the quote request and kept in server memory; it is not written to disk or browser storage. Keep all credentials private. The quote is informational only; F&O suggestions continue to use stored bhavcopy option data. **Sync latest** checks for new bhavcopy files; **Sync history** backfills the selected range.
+
 Read `docs/FNO_FRAMEWORK.md` first, especially "Read this before trusting any number": results on synthetic prices
 show how the rules behave, not what the market would have paid, and the sign of credit-spread results flips with one
 volatility assumption. Information only; not investment advice.

@@ -73,6 +73,18 @@ def test_chain_from_records_paired_and_flat_styles():
     assert len(chain_from_records("TEST", D, 100.0, EX, flat, 500, MKT).quotes) == 1
 
 
+def test_chain_from_breeze_quote_field_names_and_call_put_values():
+    rows = [
+        {"strike_price": "100", "right": "Call", "ltp": "6.2", "best_bid_price": "6.1",
+         "best_offer_price": "6.3", "open_interest": "1200", "total_quantity_traded": "80"},
+        {"strike_price": "100", "right": "Put", "ltp": "5.8", "best_bid_price": "5.7",
+         "best_offer_price": "5.9", "open_interest": "900", "total_quantity_traded": "60"},
+    ]
+    chain = chain_from_records("TEST", D, 100.0, EX, rows, 500, MKT)
+    assert chain.get("CE", 100).bid == 6.1 and chain.get("CE", 100).ask == 6.3
+    assert chain.get("PE", 100).oi == 900 and chain.get("PE", 100).volume == 60
+
+
 def test_synthetic_chain_is_arbitrage_consistent_and_spreads_are_positive():
     bars = make_synthetic_bars(300, seed=2)
     prov = SyntheticProvider("TEST", bars, MKT)
