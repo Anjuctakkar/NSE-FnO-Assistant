@@ -162,3 +162,16 @@ def test_refuses_to_listen_beyond_this_machine():
             assert "no sign-in" in str(e)
         else:
             raise AssertionError(f"served on {host!r}")
+
+
+def test_explicit_external_binding_is_an_opt_in():
+    srv = server.serve(
+        service.Context(tempfile.mkdtemp()),
+        "0.0.0.0",
+        0,
+        allow_external=True,
+    )
+    try:
+        assert srv.server_address[0] == "0.0.0.0"
+    finally:
+        srv.shutdown()

@@ -135,8 +135,9 @@ def make_handler(ctx: service.Context, heavy: threading.Semaphore):
     return Handler
 
 
-def serve(ctx: service.Context, host: str = "127.0.0.1", port: int = 8100, max_heavy: int = 2) -> ThreadingHTTPServer:
-    if host not in LOOPBACK:
+def serve(ctx: service.Context, host: str = "127.0.0.1", port: int = 8100, max_heavy: int = 2,
+          allow_external: bool = False) -> ThreadingHTTPServer:
+    if host not in LOOPBACK and not allow_external:
         raise SystemExit("This server has no sign-in, so it only listens on the local machine (127.0.0.1). "
                          "To share the UI, host it inside the dashboard (fno/api.py).")
     return ThreadingHTTPServer((host, port), make_handler(ctx, threading.Semaphore(max_heavy)))

@@ -17,6 +17,17 @@ The NSE bhavcopy sync downloads published F&O settlement files (end-of-day, not 
 
 The app version is shown beside the navigation tabs and is maintained in `fno/version.py`.
 
+## Deploy to Render
+
+This repository includes a Render Blueprint at [`render.yaml`](../render.yaml). In Render, choose **New > Blueprint** and
+select this repository. Render installs `nse-fno/requirements-live.txt`, starts `nse-fno/render_server.py`, and uses
+`/health` for health checks.
+
+The deployed service runs synthetic/demo mode out of the box. For live bhavcopy or Breeze features, add the optional
+environment variables in the Render service settings: `BREEZE_API_KEY`, `BREEZE_API_SECRET`, and
+`BREEZE_SESSION_TOKEN`. Render provides `PORT` automatically. Data in `nse-fno/data` is ephemeral unless you attach a
+Render persistent disk and set `FNO_DATA_DIR` to its mount path.
+
 Use the floating chat button to ask about the Breeze connection, the currently displayed quote, market values, or the latest strategy ideas. **App data only** mode answers deterministically from values already loaded in the page and makes no model request. **AI model** mode is optional and supports OpenAI, Anthropic, and Google Gemini. It sends the recent conversation and a summary of displayed F&O data through this server to the selected provider. The API key is sent transiently to this server and forwarded to the provider, but is not logged or stored; its field clears when you switch mode or provider. Use model mode only if you are comfortable sharing the prompt and displayed context with that provider.
 
 In **One stock**, choose **Refresh live quote** for an on-demand cash quote. For strategies based on current data, choose **ICICI Breeze live (5-minute)**: the app fetches the current cash quote and option chain, recent five-minute cash candles, and historical five-minute ATM option candles to derive IV history. Technical periods are candle counts, not days; IV rank is limited to the option history Breeze returns and is not a one-year daily rank. If Breeze does not return enough required data, the app reports the problem rather than falling back to bhavcopy. Live mode is single-stock only; whole-market scans, backtests, and futures are disabled. The lot size is marked as estimated unless Breeze provides it or it is configured in `MarketConfig`. **Sync latest** checks for new bhavcopy files; **Sync history** backfills the selected range for bhavcopy mode.

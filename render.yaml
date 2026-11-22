@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: nse-fno-assistant
+    runtime: python
+    rootDir: nse-fno
+    buildCommand: pip install --upgrade pip && pip install -r requirements-live.txt
+    startCommand: python render_server.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.13"
+      - key: PYTHONUNBUFFERED
+        value: "true"
