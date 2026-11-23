@@ -78,6 +78,25 @@ def test_breeze_live_market_methods_forward_expiry_interval_and_option_identity(
     assert history[1]["exchange_code"] == "NFO" and history[1]["strike_price"] == "100"
 
 
+def test_breeze_option_chain_and_history_use_the_resolved_nse_stock_code():
+    class MappedBreeze(FakeBreeze):
+        instances = []
+
+        def get_names(self, exchange_code, stock_code):
+            self.calls.append(("names", exchange_code, stock_code))
+            return {"isec_stock_code": "COFORGE-I"}
+
+    with patch.dict(sys.modules, {"breeze_connect": SimpleNamespace(BreezeConnect=MappedBreeze)}):
+        client = BreezeMarketClient("key", "secret", "session")
+        client.get_option_chain_records("COFORGE", "2026-12-29T00:00:00.000Z")
+        client.get_intraday_bars("COFORGE", "2026-11-16T09:15:00.000Z", "2026-11-23T10:00:00.000Z")
+        client.get_option_history("COFORGE", "2026-12-29T00:00:00.000Z", 2500, "call",
+                                  "2026-11-16T09:15:00.000Z", "2026-11-23T10:00:00.000Z")
+
+    requests = [call[1] for call in MappedBreeze.instances[0].calls if call[0] in ("option_chain", "history")]
+    assert requests and all(request["stock_code"] == "COFORGE-I" for request in requests)
+
+
 def test_breeze_quote_uses_a_session_token_entered_in_the_ui():
     env = {"BREEZE_API_KEY": "key", "BREEZE_API_SECRET": "secret", "BREEZE_SESSION_TOKEN": "old-session"}
     with patch.dict(os.environ, env, clear=True), install_fake_sdk():

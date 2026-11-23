@@ -90,6 +90,7 @@ class BreezeMarketClient:
         self.session_token = session_token
         self._client: Any = None
         self._lock = threading.Lock()
+        self._stock_codes: dict[str, str] = {}
 
     @classmethod
     def from_env(cls, session_token: Optional[str] = None) -> "BreezeMarketClient":
@@ -137,14 +138,26 @@ class BreezeMarketClient:
         self._client = client
         return client
 
+    def _nse_stock_code(self, client: Any, symbol: str) -> str:
+        if symbol in self._stock_codes:
+            return self._stock_codes[symbol]
+        try:
+            mapping = client.get_names(exchange_code="NSE", stock_code=symbol)
+        except Exception as exc:
+            raise MarketDataError(
+                f"ICICI Breeze could not resolve NSE symbol {symbol} ({type(exc).__name__})."
+            ) from exc
+        stock_code = mapping.get("isec_stock_code") if isinstance(mapping, dict) else None
+        if not stock_code:
+            raise MarketDataError(f"ICICI Breeze could not map NSE symbol {symbol}.")
+        self._stock_codes[symbol] = stock_code
+        return stock_code
+
     def get_stock_quote(self, symbol: str) -> dict[str, Any]:
         with self._lock:
             client = self._connect()
             try:
-                mapping = client.get_names(exchange_code="NSE", stock_code=symbol)
-                stock_code = mapping.get("isec_stock_code") if isinstance(mapping, dict) else None
-                if not stock_code:
-                    raise MarketDataError(f"ICICI Breeze could not map NSE symbol {symbol}.")
+                stock_code = self._nse_stock_code(client, symbol)
                 response = client.get_quotes(
                     stock_code=stock_code,
                     exchange_code="NSE",
@@ -178,11 +191,12 @@ class BreezeMarketClient:
 
     def get_option_chain_records(self, symbol: str, expiry: str) -> list[dict[str, Any]]:
         client = self._connect()
+        stock_code = self._nse_stock_code(client, symbol)
         records = []
         for right in ("call", "put"):
             try:
                 response = client.get_option_chain_quotes(
-                    stock_code=symbol,
+                    stock_code=stock_code,
                     exchange_code="NFO",
                     expiry_date=expiry,
                     product_type="options",
@@ -198,12 +212,13 @@ class BreezeMarketClient:
     def get_intraday_bars(self, symbol: str, from_date: str, to_date: str,
                           interval: str = "5minute") -> list[dict[str, Any]]:
         client = self._connect()
+        stock_code = self._nse_stock_code(client, symbol)
         try:
             response = client.get_historical_data_v2(
                 interval=interval,
                 from_date=from_date,
                 to_date=to_date,
-                stock_code=symbol,
+                stock_code=stock_code,
                 exchange_code="NSE",
                 product_type="cash",
             )
@@ -215,12 +230,13 @@ class BreezeMarketClient:
                            from_date: str, to_date: str,
                            interval: str = "5minute") -> list[dict[str, Any]]:
         client = self._connect()
+        stock_code = self._nse_stock_code(client, symbol)
         try:
             response = client.get_historical_data_v2(
                 interval=interval,
                 from_date=from_date,
                 to_date=to_date,
-                stock_code=symbol,
+                stock_code=stock_code,
                 exchange_code="NFO",
                 product_type="options",
                 expiry_date=expiry,

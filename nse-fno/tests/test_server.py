@@ -39,6 +39,9 @@ def test_pages_health_and_security_headers():
         assert h["X-Frame-Options"] == "DENY" and h["X-Content-Type-Options"] == "nosniff" and h["Cache-Control"] == "no-store"
         code, h, body = call(base + "/fno.js")
         assert code == 200 and "javascript" in h["Content-Type"] and b"NSE F&O UI" in body
+        code, h, body = call(base + "/laxmi-logo-dark.png")
+        logo = (server.STATIC / "laxmi-logo-dark.png").read_bytes()
+        assert code == 200 and h["Content-Type"] == "image/png" and body == logo
         assert json.loads(call(base + "/health")[2]) == {"ok": True}
         assert json.loads(call(base + "/api/auth/status")[2]) == {"auth_enabled": False, "user": None}      # the UI's sign-in probe
         assert call(base + "/nope")[0] == 404 and call(base + "/../../etc/passwd")[0] == 404

@@ -6,12 +6,15 @@
 <title>NSE F&amp;O</title>
 <style>
   html, body { margin: 0; background: #f1f7ef; color: #17251b; font-family: "Segoe UI", Inter, -apple-system, BlinkMacSystemFont, Roboto, sans-serif; font-size: 14px; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
-  .shell-top { height: 52px; display: flex; align-items: center; padding: 0 20px; background: #e7f0e5; border-bottom: 1px solid #b7c9b8; font-weight: 700; letter-spacing: -.01em; }
-  .shell-top small { color: #4f6555; font-weight: 500; margin-left: 10px; font-size: 12.5px; }
+  .shell-top { min-height: 72px; display: flex; align-items: center; gap: 16px; padding: 6px 20px; background: #0b0310; border-bottom: 3px solid #60356b; color: #fff; font-weight: 700; letter-spacing: -.01em; }
+  .shell-top img { display: block; width: 152px; height: auto; border-radius: 4px; }
+  .shell-label { display: flex; flex-direction: column; gap: 2px; }
+  .shell-top small { color: #d7bd77; font-weight: 500; font-size: 12.5px; }
+  @media (max-width: 520px) { .shell-top { min-height: 60px; gap: 10px; padding: 6px 12px; } .shell-top img { width: 112px; } .shell-top small { font-size: 11px; } }
 </style>
 </head>
 <body>
-<div class="shell-top">NSE F&amp;O<small>Technical + Greeks trade suggestions, backtest and evaluation</small></div>
+<header class="shell-top"><img src="/laxmi-logo-dark.png" alt="Laxmi Edge with AI" /><div class="shell-label"><strong>NSE F&amp;O</strong><small>Technical + Greeks trade suggestions, backtest and evaluation</small></div></header>
 <div id="fno-root"></div>
 <script src="/fno.js"></script>
 </body>

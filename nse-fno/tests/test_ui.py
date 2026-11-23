@@ -27,6 +27,9 @@ def test_ui_script_has_valid_syntax_and_no_cdn_dependencies():
     assert 'id="fnoLiveRefresh"' in js and 'post("/live/quote"' in js
     assert "ICICI Breeze quote is fetched on demand" in js
     assert 'id="fnoAppVersion"' in js and 'textContent = appVersion ? `App version ${appVersion}`' in js
+    assert "loaded NSE option data" in js and "no loaded NSE contracts" in js
+    assert 'class="fno-toolbar"' in js
+    assert 'src="/laxmi-logo-dark.png" alt="Laxmi Edge with AI"' in html
     assert 'id="fnoChatToggle"' in js and 'id="fnoChatPanel"' in js
     assert 'id="fnoChatMode"' in js and "App data only · no model" in js and "AI model" in js
     assert 'id="fnoChatProvider"' in js and 'id="fnoChatApiKey"' in js

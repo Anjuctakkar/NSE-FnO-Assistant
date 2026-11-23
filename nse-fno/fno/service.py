@@ -505,8 +505,18 @@ def list_expiries(ctx: Context, req: dict[str, Any]) -> dict[str, Any]:
         if symbol:
             symbol = _sym({"symbol": symbol})
         asof = _india_now().date()
+        if symbol:
+            stored_dates = [day for day in ctx.store.dates() if day <= asof]
+            if stored_dates:
+                stored_expiries = sorted({
+                    row["expiry"] for row in ctx.store.read_day(stored_dates[-1], {symbol})
+                    if row["inst"] == "OPT" and row["expiry"] > asof
+                })
+                if stored_expiries:
+                    return jsonable({"source": source, "symbol": symbol, "asof": asof,
+                                     "expiries": stored_expiries, "expiry_source": "bhavcopy"})
         return jsonable({"source": source, "symbol": symbol, "asof": asof,
-                         "expiries": monthly_expiries(asof, 12, ctx.mkt)})
+                         "expiries": monthly_expiries(asof, 12, ctx.mkt), "expiry_source": "calendar"})
     if source == "synthetic":
         symbol = symbol or DEMO_SYMBOLS[0]
         prov, bars, _ = get_provider(ctx, source, symbol, None, _f(req, "iv_scale", 1.0, 0.5, 2.0))

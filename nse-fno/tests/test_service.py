@@ -247,6 +247,37 @@ def test_one_stock_expiry_list_and_selected_expiry_suggestions():
         raise AssertionError("expected ServiceError for an expiry absent from this symbol's data")
 
 
+def test_breeze_expiries_prefer_loaded_symbol_contracts_and_skip_expired_contracts():
+    ctx = service.Context(tempfile.mkdtemp())
+    snapshot = dt.date(2026, 11, 20)
+    contracts = []
+    for symbol, expiries in {
+        "TCS": [dt.date(2026, 11, 23), dt.date(2026, 12, 29), dt.date(2027, 1, 25)],
+        "OTHER": [dt.date(2026, 11, 24), dt.date(2026, 12, 29)],
+    }.items():
+        contracts.extend({
+            "date": snapshot, "symbol": symbol, "inst": "OPT", "expiry": expiry,
+            "strike": 2500, "kind": "CE", "price": 10, "oi": 100, "volume": 10,
+            "under": 2500, "lot": 100,
+        } for expiry in expiries)
+    write_canonical(ctx.store.path_for(snapshot), contracts)
+
+    with patch.object(service, "_india_now", return_value=dt.datetime(2026, 11, 23, 10, 0)):
+        result = service.list_expiries(ctx, {"source": "breeze-live", "symbol": "TCS"})
+
+    assert result["expiries"] == ["2026-12-29", "2027-01-25"]
+    assert result["expiry_source"] == "bhavcopy"
+
+
+def test_breeze_expiries_fall_back_to_calendar_without_loaded_symbol_contracts():
+    ctx = service.Context(tempfile.mkdtemp())
+    with patch.object(service, "_india_now", return_value=dt.datetime(2026, 11, 23, 10, 0)):
+        result = service.list_expiries(ctx, {"source": "breeze-live", "symbol": "TCS"})
+
+    assert result["expiries"]
+    assert result["expiry_source"] == "calendar"
+
+
 def live_market_fixture(ctx, asof, expiry, count=70):
     bars, options = [], {"call": [], "put": []}
     start = dt.datetime.combine(asof, dt.time(9, 15))

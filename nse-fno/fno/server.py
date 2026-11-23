@@ -20,7 +20,8 @@ from . import service
 
 STATIC = Path(__file__).resolve().parent / "static"
 FILES = {"/": ("index.html", "text/html; charset=utf-8"), "/index.html": ("index.html", "text/html; charset=utf-8"),
-         "/fno.js": ("fno.js", "application/javascript; charset=utf-8")}
+         "/fno.js": ("fno.js", "application/javascript; charset=utf-8"),
+         "/laxmi-logo-dark.png": ("laxmi-logo-dark.png", "image/png")}
 MAX_JSON = 8 * 1024 * 1024
 MAX_UPLOAD = 200 * 1024 * 1024
 LOOPBACK = {"127.0.0.1", "::1", "localhost"}

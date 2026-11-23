@@ -742,7 +742,9 @@
       sel.value = expiries.includes(keep) ? keep : (expiries[0] || "");
       sel.disabled = expiries.length === 0;
       $("#fnoExpiryHint").textContent = S.source === "breeze-live"
-        ? `Upcoming monthly expiries for ${val("#fnoSym").trim().toUpperCase()}; Breeze must return a live chain for the selected expiry.`
+        ? result.expiry_source === "bhavcopy"
+          ? `Upcoming expiries for ${val("#fnoSym").trim().toUpperCase()} from loaded NSE option data; Breeze must return a live chain for the selected expiry.`
+          : `Estimated monthly expiries for ${val("#fnoSym").trim().toUpperCase()} (no loaded NSE contracts); verify against Breeze.`
         : S.mode === "one" ? `Expiries available for ${val("#fnoSym").trim().toUpperCase()} on the selected day.`
         : "Only expiries with option data on the selected day are listed.";
       if (!expiries.length) say("#fnoMsg", "No upcoming option expiries are available for this day.", "err");
